@@ -8,7 +8,7 @@ import numpy as np
 
 class FromGym(embodied.Env):
 
-  def __init__(self, env, obs_key='image', act_key='action', **kwargs):
+  def __init__(self, env, obs_key='image', act_key='action', is_022_gym_api=True, **kwargs):
     if isinstance(env, str):
       self._env = gym.make(env, **kwargs)
     else:
@@ -20,6 +20,7 @@ class FromGym(embodied.Env):
     self._act_key = act_key
     self._done = True
     self._info = None
+    self._is_022_gym_api = is_022_gym_api
 
   @property
   def env(self):
@@ -57,17 +58,30 @@ class FromGym(embodied.Env):
   def step(self, action):
     if action['reset'] or self._done:
       self._done = False
-      obs = self._env.reset()
+      output = self._env.reset()
+      if self._is_022_gym_api:
+        obs = output
+      else:
+        obs, self._info = output
+
       return self._obs(obs, 0.0, is_first=True)
     if self._act_dict:
       action = self._unflatten(action)
     else:
       action = action[self._act_key]
-    obs, reward, self._done, self._info = self._env.step(action)
+    output = self._env.step(action)
+    if self._is_022_gym_api:
+      obs, reward, self._done, self._info = output
+      is_terminal = bool(self._info.get('is_terminal', self._done))
+    else:
+      obs, reward, terminated, truncated, self._info = output
+      self._done = terminated or truncated
+      is_terminal = terminated
+
     return self._obs(
         obs, reward,
         is_last=bool(self._done),
-        is_terminal=bool(self._info.get('is_terminal', self._done)))
+        is_terminal=is_terminal)
 
   def _obs(
       self, obs, reward, is_first=False, is_last=False, is_terminal=False):
@@ -120,4 +134,6 @@ class FromGym(embodied.Env):
   def _convert(self, space):
     if hasattr(space, 'n'):
       return elements.Space(np.int32, (), 0, space.n)
+    if isinstance(space, gym.spaces.Text):
+      return elements.Space(str, (), None, None)
     return elements.Space(space.dtype, space.shape, space.low, space.high)
