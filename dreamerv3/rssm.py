@@ -192,8 +192,9 @@ class Encoder(nj.Module):
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    self.slotkeys = [k for k, s in obs_space.items() if k.startswith('slots')]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and k not in self.slotkeys]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and k not in self.slotkeys]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
 
@@ -243,6 +244,12 @@ class Encoder(nj.Module):
       assert 3 <= x.shape[-2] <= 16, x.shape
       x = x.reshape((x.shape[0], -1))
       outs.append(x)
+
+    if self.slotkeys:
+      for k in sorted(self.slotkeys):
+        slots_data = obs[k]
+        slots_data = slots_data.reshape((-1, *slots_data.shape[bdims:]))
+        outs.append(slots_data)
 
     x = jnp.concatenate(outs, -1)
     tokens = x.reshape((*bshape, *x.shape[1:]))
