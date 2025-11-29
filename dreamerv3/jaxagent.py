@@ -146,7 +146,8 @@ class JAXAgent(embodied.Agent):
     jax.config.update('jax_platform_name', self.config.platform)
     jax.config.update('jax_disable_jit', not self.config.jit)
     jax.config.update('jax_debug_nans', self.config.debug_nans)
-    jax.config.update('jax_transfer_guard', 'disallow')
+    if not self.config.debug:
+        jax.config.update('jax_transfer_guard', 'disallow')
     if self.config.platform == 'cpu':
       jax.config.update('jax_disable_most_optimizations', self.config.debug)
     jaxutils.COMPUTE_DTYPE = getattr(jnp, self.config.precision)
