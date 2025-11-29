@@ -121,7 +121,7 @@ class Agent(embodied.Agent):
         for k, v in self.train_params_sharding.items()
         if k in self.policy_keys}
 
-    shared_kwargs = {'use_shardmap': jaxcfg.use_shardmap}
+    shared_kwargs = {'use_shardmap': jaxcfg.use_shardmap, 'debug': self.config.jax.debug}
     tm, ts = self.train_mirrored, self.train_sharded
     pm, ps = self.policy_mirrored, self.policy_sharded
     tp, pp = self.train_params_sharding, self.policy_params_sharding
@@ -199,8 +199,10 @@ class Agent(embodied.Agent):
     batch_size = batch_size * jax.process_count()
     if self.jaxcfg.use_shardmap:
       batch_size = batch_size // self.policy_mesh.size
-    return self._split(internal.to_local(self._init_policy(
-        self.policy_params, self._seeds(0, self.policy_mirrored), batch_size)))
+    return self._split(internal.to_local(
+        self._init_policy(self.policy_params, self._seeds(0, self.policy_mirrored), batch_size),
+        debug=self.config.jax.debug
+    ))
 
   def init_train(self, batch_size):
     batch_size = batch_size * jax.process_count()
@@ -247,7 +249,7 @@ class Agent(embodied.Agent):
           self.pending_sync = None
 
     acts, outs = self._take_outs(internal.fetch_async((acts, outs)))
-    carry = self._split(internal.to_local(carry))
+    carry = self._split(internal.to_local(carry, debug=self.config.jax.debug))
 
     finite = outs.pop('finite', {})
     for key, fin in finite.items():

@@ -70,6 +70,8 @@ def apply(
     split_rng=True,
     use_shardmap=False,
     first_outnums=(),
+    # use jit
+    debug=False,
 ):
 
   if single_output:
@@ -129,7 +131,8 @@ def apply(
         nn.LAYER_CALLBACK = old
       return outs
 
-  fn = jax.jit(fn, in_shardings, out_shardings, static_argnums, None, donate)
+  if not debug:
+    fn = jax.jit(fn, in_shardings, out_shardings, static_argnums, None, donate)
 
   return fn
 

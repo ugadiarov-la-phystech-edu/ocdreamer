@@ -34,7 +34,7 @@ def setup(
   platform and jax.config.update('jax_platforms', platform)
   jax.config.update('jax_disable_most_optimizations', debug)
   jax.config.update('jax_disable_jit', not jit)
-  if transfer_guard and jit and not debug_nans:
+  if transfer_guard and jit and not debug_nans and not debug:
     jax.config.update('jax_transfer_guard', 'disallow')
   os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = str(bool(prealloc)).lower()
   jax.config.update('jax_debug_nans', debug_nans)
@@ -157,11 +157,15 @@ def local_sharding(sharding):
     s.mesh.local_mesh, s.spec), sharding)
 
 
-def to_local(x):
-  return jax.tree.map(_to_local, x)
+def to_local(x, debug=False):
+  __to_local = lambda y: _to_local(y, debug)
+  return jax.tree.map(__to_local, x)
 
 
-def _to_local(x):
+def _to_local(x, debug=False):
+  if debug:
+      return x
+
   shape, sharding = x.shape, x.sharding
   spec, mesh = sharding.spec, sharding.mesh
   fullspec = [*spec, *([None] * (len(shape) - len(spec)))]
