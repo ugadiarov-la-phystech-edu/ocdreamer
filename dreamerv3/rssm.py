@@ -30,11 +30,16 @@ class RSSM(nj.Module):
   absolute: bool = False
   blocks: int = 8
   free_nats: float = 1.0
+  use_transformer: bool = True
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
     self.act_space = act_space
     self.kw = kw
+    if self.use_transformer:
+      self._core = self._core_transformer
+    else:
+      self._core = self._core_gru
 
   @property
   def entry_space(self):
@@ -132,7 +137,7 @@ class RSSM(nj.Module):
     metrics['rep_ent'] = self._dist(post).entropy().mean()
     return carry, entries, losses, feat, metrics
 
-  def _core(self, deter, stoch, action):
+  def _core_gru(self, deter, stoch, action):
     stoch = stoch.reshape((stoch.shape[0], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     g = self.blocks
@@ -156,6 +161,17 @@ class RSSM(nj.Module):
     cand = jnp.tanh(reset * cand)
     update = jax.nn.sigmoid(update - 1)
     deter = update * cand + (1 - update) * deter
+    return deter
+
+  def _core_transformer(self, deter, stoch, action):
+    stoch = stoch.reshape((stoch.shape[0], -1))
+    action /= sg(jnp.maximum(1, jnp.abs(action)))
+    x = jnp.concatenate([stoch, action], -1)
+    x = self.sub('img_in', nn.Linear, self.hidden)(x)
+    deter = self.sub('transformer', Transformer, d_model_inner=64,
+        num_heads=8, feed_forward_dim=self.deter, num_layers=6,
+            kw={'act':'none'})(x, deter)
+
     return deter
 
   def _prior(self, feat):
@@ -357,3 +373,94 @@ class Decoder(nj.Module):
 
     entries = {}
     return carry, entries, recons
+
+
+class MultiHeadSelfAttention(nj.Module):
+  def __init__(self, d_model_inner, num_heads, kw):
+    self.d_model_inner = d_model_inner
+    self.num_heads = num_heads
+    self._kw = kw
+    self.head_dim = self.d_model_inner // self.num_heads
+    self.hidden = self.d_model_inner * self.num_heads
+
+  def __call__(self, x):
+    batch_size, embed_dim = x.shape
+
+    # Create queries, keys, values
+    query = self.sub('linear1_M', nn.Linear, self.hidden)(x)
+    query = query.reshape(batch_size, -1, self.num_heads, self.head_dim)
+    key = self.sub('linear2_M', nn.Linear, self.hidden)(x)
+    key = key.reshape(batch_size, -1, self.num_heads, self.head_dim)
+    value = self.sub('linear3_M', nn.Linear, self.hidden)(x)
+    value = value.reshape(batch_size, -1, self.num_heads, self.head_dim)
+
+    # Calculate attention scores
+    scores = jnp.einsum('bqhd,bkhd->bhqk', query, key) / jnp.sqrt(self.head_dim)
+    weights = jax.nn.softmax(scores, axis=-1)
+
+    # Apply attention to value
+    attention_output = jnp.einsum('bhqk,bkhd->bqhd', weights, value).reshape(batch_size, -1, self.hidden)
+
+    # Final dense layer
+    output = self.sub('linear4_M', nn.Linear, embed_dim)(attention_output)
+    output = output.reshape(1, batch_size, -1).squeeze(0)
+    return output
+
+
+class TransformerLayer(nj.Module):
+
+  def __init__(self, d_model_inner, num_heads, feed_forward_dim, kw):
+    self.d_model_inner = d_model_inner
+    self.num_heads = num_heads
+    self.feed_forward_dim = feed_forward_dim
+    self._kw = kw
+
+  def __call__(self, x):
+    batch_size, embed_dim = x.shape
+    # Multi-head self-attention
+    attn_output = self.sub('MultiHeadSelfAttention', MultiHeadSelfAttention,
+            self.d_model_inner, self.num_heads, self._kw)(x)
+
+    attn_output = self.sub('layernorm1_TL', nn.Norm, 'layer')(x + attn_output)
+
+    # Feed-forward
+    ff_output = self.sub('linear1_TL', nn.Linear, self.feed_forward_dim)(attn_output)
+    ff_output = jax.nn.relu(ff_output)
+    ff_output = self.sub('linear2_TL', nn.Linear, embed_dim)(ff_output)
+    ff_output = self.sub('layernorm2_TL', nn.Norm, 'layer')(attn_output + ff_output)
+    ff_output = ff_output.reshape(1, batch_size, -1).squeeze(0)
+    return ff_output
+
+# class PositionalEmbedding(nj.Module):
+#   def __init__(self, d_model=600):
+#     self.d_model = d_model
+
+#   def __call__(self, positions):
+#       # Initialize the frequencies
+#       inv_freq = 1 / (10000 ** (jnp.arange(0.0, self.dim, 2.0) / self.dim))
+
+#       # Calculate the positional embeddings
+#       sinusoid_inp = jnp.einsum("i,j->ij", positions.astype(jnp.float32), inv_freq)
+#       pos_emb = jnp.concatenate([jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)], axis=-1)
+#       return pos_emb[:, None, :]
+
+class Transformer(nj.Module):
+  def __init__(self, d_model_inner=64, num_heads=8, feed_forward_dim=512, num_layers=6, kw=None):
+    self.d_model_inner = d_model_inner
+    self.num_heads = num_heads
+    self.feed_forward_dim = feed_forward_dim
+    self.num_layers = num_layers
+    self._kw = kw
+
+  def __call__(self, x, deter):
+    x = jnp.concatenate([deter, x], axis=-1)
+
+    # Transformer layers
+    for _ in range(self.num_layers):
+      x = self.sub('TransformerLayer', TransformerLayer, self.d_model_inner,
+            self.num_heads, self.feed_forward_dim, self._kw)(x)
+
+    # Add an additional Dense layer to project down to the desired size
+    x = self.sub('linear2_T', nn.Linear, deter.shape[1])(x)
+
+    return x
