@@ -1,0 +1,23 @@
+# tested with cuda 11.8 and cudnn 8.6
+
+ale_py==0.9.0
+autorom[accept-rom-license]==0.6.1
+av
+chex==0.1.86
+colored_traceback
+einops
+elements>=3.19.1
+google-resumable-media>=2.7.2
+granular>=0.20.3
+ipdb
+#jax[cuda11_pip]==0.4.25
+jaxtyping==0.2.25
+ninjax==3.6.2
+numpy==1.26.4  # DMLab: <2, MineRLv1.0: <1.24
+#nvidia-cuda-nvcc-cu12<=12.2
+optax==0.2.0
+portal>=3.5.0
+scope>=0.4.4
+tqdm
+comet_ml
+moviepy==1.0.3
