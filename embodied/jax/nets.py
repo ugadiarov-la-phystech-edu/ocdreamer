@@ -590,7 +590,7 @@ class MLP(nj.Module):
 class Transformer(nj.Module):
 
   units: int = 1024
-  layers: int = 12
+  layers: int = 6
   heads: int = 8
   ffup: int = 4
   act: str = 'silu'
@@ -608,6 +608,7 @@ class Transformer(nj.Module):
     ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale')}
     D = x.shape[-1]
     assert D == self.units, (D, self.units)
+    out = []
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
         skip = x
@@ -627,7 +628,10 @@ class Transformer(nj.Module):
           ff2 = self.sub('ff2', Linear, D, **kw, outscale=self.outscale)
           x = ff2(act(self.act)(ff1(x)))
         x += skip
-    x = self.sub('outnorm', Norm, self.norm)(x)
+        out.append(x)
+    x = jnp.stack(out, axis=2)
+    x = x.reshape((x.shape[0], x.shape[1], -1))
+    # x = self.sub('outnorm', Norm, self.norm)(x)
     return x
 
 

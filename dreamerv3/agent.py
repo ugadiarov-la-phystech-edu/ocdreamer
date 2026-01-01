@@ -2,6 +2,7 @@ import re
 
 import chex
 import elements
+
 import embodied.jax
 import embodied.jax.nets as nn
 import jax
@@ -80,6 +81,9 @@ class Agent(embodied.jax.Agent):
     scales = self.config.loss_scales.copy()
     rec = scales.pop('rec')
     scales.update({k: rec for k in dec_space})
+    if not self.config.repval_loss:
+        del scales['repval']
+
     self.scales = scales
 
   @property
@@ -99,7 +103,7 @@ class Agent(embodied.jax.Agent):
     return spaces
 
   def init_policy(self, batch_size):
-    zeros = lambda x: jnp.zeros((batch_size, *x.shape), x.dtype)
+    zeros = lambda x: jnp.zeros((batch_size, self.dyn.max_context_length, *x.shape), x.dtype)
     return (
         self.enc.initial(batch_size),
         self.dyn.initial(batch_size),
@@ -119,16 +123,20 @@ class Agent(embodied.jax.Agent):
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
     dyn_carry, dyn_entry, feat = self.dyn.observe(
         dyn_carry, tokens, prevact, reset, **kw)
-    dec_entry = {}
+    dyn_entry = {k: v[:, -1] for k, v in dyn_entry.items()}
+    feat = {k: v[:, -1] for k, v in feat.items()}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
+    dec_entry = {}
     policy = self.pol(self.feat2tensor(feat), bdims=1)
     act = sample(policy)
     out = {}
     out['finite'] = elements.tree.flatdict(jax.tree.map(
         lambda x: jnp.isfinite(x).all(range(1, x.ndim)),
         dict(obs=obs, carry=carry, tokens=tokens, feat=feat, act=act)))
-    carry = (enc_carry, dyn_carry, dec_carry, act)
+    prevact['action'] = jnp.roll(prevact['action'], -1, axis=1)
+    prevact['action'] = prevact['action'].at[:, -1].set(act['action'])
+    carry = (enc_carry, dyn_carry, dec_carry, prevact)
     if self.config.replay_context:
       out.update(elements.tree.flatdict(dict(
           enc=enc_entry, dyn=dyn_entry, dec=dec_entry)))
@@ -150,8 +158,68 @@ class Agent(embodied.jax.Agent):
       outs['replay'] = updates
     # if self.config.replay.fracs.priority > 0:
     #   outs['replay']['priority'] = losses['model']
-    carry = (*carry, {k: data[k][:, -1] for k in self.act_space})
+    carry = (*carry, {k: data[k][:, -self.dyn.max_context_length:] for k in self.act_space})
+    assert carry[3]['action'].shape[1] == self.dyn.max_context_length, (carry[3]['action'].shape, self.dyn.max_context_length)
     return carry, outs, metrics
+
+  def imagination_transformer(self, dyn_entries, dyn_carry, repfeat, actions, B, K, H, training):
+      context_length = jax.random.randint(nj.seed(), shape=(), minval=1, maxval=H)
+      # TODO: implement random context length - e.g. rotation array and masking in transformer
+      context_length = self.config.batch_length - 1
+      state_starts = {k: v[:, :context_length] for k, v in dyn_entries.items()}
+      action_starts = actions[:, :context_length]
+      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+      _, imgfeat, imgprevact = self.dyn.imagine_transformer((state_starts, action_starts), policyfn, H, training)
+      first = jax.tree.map(lambda x: x[:, -1:], repfeat)
+      imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
+      lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
+      lastact = jax.tree.map(lambda x: x[:, None], lastact)
+      imgact = concat([imgprevact, lastact], 1)
+      assert all(x.shape[:2] == (B, H + 1) for x in jax.tree.leaves(imgfeat))
+      assert all(x.shape[:2] == (B, H + 1) for x in jax.tree.leaves(imgact))
+      inp = self.feat2tensor(imgfeat)
+      los, imgloss_out, mets = imag_loss(
+          imgact,
+          self.rew(inp, 2).pred(),
+          self.con(inp, 2).prob(1),
+          self.pol(inp, 2),
+          self.val(inp, 2),
+          self.slowval(inp, 2),
+          self.retnorm, self.valnorm, self.advnorm,
+          update=training,
+          contdisc=self.config.contdisc,
+          horizon=self.config.horizon,
+          **self.config.imag_loss)
+
+      return los, imgloss_out, mets
+
+  def imagination(self, dyn_entries, dyn_carry, repfeat, actions, B, K, H, training):
+      starts = self.dyn.starts(dyn_entries, dyn_carry, K)
+      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+      _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
+      first = jax.tree.map(
+          lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
+      imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
+      lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
+      lastact = jax.tree.map(lambda x: x[:, None], lastact)
+      imgact = concat([imgprevact, lastact], 1)
+      assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
+      assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
+      inp = self.feat2tensor(imgfeat)
+      los, imgloss_out, mets = imag_loss(
+          imgact,
+          self.rew(inp, 2).pred(),
+          self.con(inp, 2).prob(1),
+          self.pol(inp, 2),
+          self.val(inp, 2),
+          self.slowval(inp, 2),
+          self.retnorm, self.valnorm, self.advnorm,
+          update=training,
+          contdisc=self.config.contdisc,
+          horizon=self.config.horizon,
+          **self.config.imag_loss)
+
+      return los, imgloss_out, mets
 
   def loss(self, carry, obs, prevact, training):
     enc_carry, dyn_carry, dec_carry = carry
@@ -188,35 +256,46 @@ class Agent(embodied.jax.Agent):
     # Imagination
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
-    starts = self.dyn.starts(dyn_entries, dyn_carry, K)
-    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
-    _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
-    first = jax.tree.map(
-        lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
-    imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
-    lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
-    lastact = jax.tree.map(lambda x: x[:, None], lastact)
-    imgact = concat([imgprevact, lastact], 1)
-    assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
-    assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
-    inp = self.feat2tensor(imgfeat)
-    los, imgloss_out, mets = imag_loss(
-        imgact,
-        self.rew(inp, 2).pred(),
-        self.con(inp, 2).prob(1),
-        self.pol(inp, 2),
-        self.val(inp, 2),
-        self.slowval(inp, 2),
-        self.retnorm, self.valnorm, self.advnorm,
-        update=training,
-        contdisc=self.config.contdisc,
-        horizon=self.config.horizon,
-        **self.config.imag_loss)
-    losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items()})
+    if self.config.dyn.rssm.use_transformer:
+      los, imgloss_out, mets = self.imagination_transformer(dyn_entries, dyn_carry, repfeat, prevact['action'],
+                                                            B, K, H, training)
+      losses.update({k: v.mean(1).reshape((B,)) for k, v in los.items()})
+    else:
+      los, imgloss_out, mets = self.imagination(dyn_entries, dyn_carry, repfeat, prevact['action'], B, K, H,
+                                                training)
+      losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items()})
+
     metrics.update(mets)
+    # starts = self.dyn.starts(dyn_entries, dyn_carry, K)
+    # policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+    # _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
+    # first = jax.tree.map(
+    #     lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
+    # imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
+    # lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
+    # lastact = jax.tree.map(lambda x: x[:, None], lastact)
+    # imgact = concat([imgprevact, lastact], 1)
+    # assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
+    # assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
+    # inp = self.feat2tensor(imgfeat)
+    # los, imgloss_out, mets = imag_loss(
+    #     imgact,
+    #     self.rew(inp, 2).pred(),
+    #     self.con(inp, 2).prob(1),
+    #     self.pol(inp, 2),
+    #     self.val(inp, 2),
+    #     self.slowval(inp, 2),
+    #     self.retnorm, self.valnorm, self.advnorm,
+    #     update=training,
+    #     contdisc=self.config.contdisc,
+    #     horizon=self.config.horizon,
+    #     **self.config.imag_loss)
+    # losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items()})
+    # metrics.update(mets)
 
     # Replay
     if self.config.repval_loss:
+      # TODO: Does not work with transformer as currently we do not start imagination from every state of trajectory
       feat = sg(repfeat, skip=self.config.repval_grad)
       last, term, rew = [obs[k] for k in ('is_last', 'is_terminal', 'reward')]
       boot = imgloss_out['ret'][:, 0].reshape(B, K)
@@ -245,6 +324,7 @@ class Agent(embodied.jax.Agent):
     return loss, (carry, entries, outs, metrics)
 
   def report(self, carry, data):
+    # TODO: Does not work with transformer as carry (length of transformer context) grows during iterations
     if not self.config.report:
       return carry, {}
 
@@ -314,7 +394,7 @@ class Agent(embodied.jax.Agent):
     carry = (enc_carry, dyn_carry, dec_carry)
     stepid = data['stepid']
     obs = {k: data[k] for k in self.obs_space}
-    prepend = lambda x, y: jnp.concatenate([x[:, None], y[:, :-1]], 1)
+    prepend = lambda x, y: jnp.concatenate([x[:, -1:], y[:, :-1]], 1)
     prevact = {k: prepend(prevact[k], data[k]) for k in self.act_space}
     if not self.config.replay_context:
       return carry, obs, prevact, stepid

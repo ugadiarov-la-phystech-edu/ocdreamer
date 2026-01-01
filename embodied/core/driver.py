@@ -8,11 +8,12 @@ import portal
 
 class Driver:
 
-  def __init__(self, make_env_fns, parallel=True, **kwargs):
+  def __init__(self, make_env_fns, max_context_length, parallel=True, **kwargs):
     assert len(make_env_fns) >= 1
     self.parallel = parallel
     self.kwargs = kwargs
     self.length = len(make_env_fns)
+    self.max_context_length = max_context_length
     if parallel:
       import multiprocessing as mp
       context = mp.get_context()
@@ -57,7 +58,7 @@ class Driver:
     acts = self.acts
     assert all(len(x) == self.length for x in acts.values())
     assert all(isinstance(v, np.ndarray) for v in acts.values())
-    acts = [{k: v[i] for k, v in acts.items()} for i in range(self.length)]
+    acts = [{'action': acts['action'][i], 'reset': acts['reset'][i]} for i in range(self.length)]
     if self.parallel:
       [pipe.send(('step', act)) for pipe, act in zip(self.pipes, acts)]
       obs = [self._receive(pipe) for pipe in self.pipes]
@@ -72,7 +73,9 @@ class Driver:
         list(outs.keys()), list(acts.keys()))
     if obs['is_last'].any():
       mask = ~obs['is_last']
+      # TODO: recreate action context for environment witch is to be reseted
       acts = {k: self._mask(v, mask) for k, v in acts.items()}
+      self.carry[3]['action'] = [int(m) * action for m, action in zip(mask, self.carry[3]['action'])]
     self.acts = {**acts, 'reset': obs['is_last'].copy()}
     trans = {**obs, **acts, **outs, **logs}
     for i in range(self.length):

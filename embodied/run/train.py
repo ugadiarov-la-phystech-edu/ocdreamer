@@ -55,7 +55,7 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
       epstats.add(result)
 
   fns = [bind(make_env, i) for i in range(args.envs)]
-  driver = embodied.Driver(fns, parallel=not args.debug)
+  driver = embodied.Driver(fns, max_context_length=args.max_context_length, parallel=args.debug)
   driver.on_step(lambda tran, _: step.increment())
   driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(replay.add)
