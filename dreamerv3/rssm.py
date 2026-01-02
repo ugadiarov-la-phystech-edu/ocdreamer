@@ -55,8 +55,8 @@ class RSSM(nj.Module):
   def initial(self, bsize):
     deter = self.deter * self.n_transformer_layers
     carry = nn.cast(dict(
-        deter=jnp.zeros([bsize, deter], f32),
-        stoch=jnp.zeros([bsize, self.stoch, self.classes], f32)))
+        deter=jnp.zeros([bsize, self.max_context_length ,deter], f32),
+        stoch=jnp.zeros([bsize, self.max_context_length, self.stoch, self.classes], f32)))
     return carry
 
   def truncate(self, entries, carry=None):
@@ -84,6 +84,7 @@ class RSSM(nj.Module):
     post = self._prior('posterior_transdreamer', tokens)
     post_stoch = nn.cast(self._dist(post).sample(seed=nj.seed()))
     prev_states = jnp.concatenate([carry['stoch'][:, None], post_stoch[:, :-1]], axis=1)
+    # TODO: Can we get rid of trimming action? prev_states and action should always have max_context_length
     deter = self._core(None, prev_states, action[:, -prev_states.shape[1]:])
     # prior = self._prior('prior_transdreamer', deter)
     # dyn = self._dist(sg(post)).kl(self._dist(prior))

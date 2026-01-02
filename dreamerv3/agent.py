@@ -400,13 +400,17 @@ class Agent(embodied.jax.Agent):
       return carry, obs, prevact, stepid
 
     K = self.config.replay_context
+    assert K <= self.dyn.max_context_length, (K, self.dyn.max_context_length)
     nested = elements.tree.nestdict(data)
     entries = [nested.get(k, {}) for k in ('enc', 'dyn', 'dec')]
     lhs = lambda xs: jax.tree.map(lambda x: x[:, :K], xs)
     rhs = lambda xs: jax.tree.map(lambda x: x[:, K:], xs)
+    rep_carry_dyn = self.dyn.truncate(lhs(entries[1]), dyn_carry)
+    rep_carry_dyn_context = {k: jnp.concatenate([jnp.zeros_like(v[:, :-1]), rep_carry_dyn[k][:, None]], axis=1) for k, v
+                             in dyn_carry.items()}
     rep_carry = (
         self.enc.truncate(lhs(entries[0]), enc_carry),
-        self.dyn.truncate(lhs(entries[1]), dyn_carry),
+        rep_carry_dyn_context,
         self.dec.truncate(lhs(entries[2]), dec_carry))
     rep_obs = {k: rhs(data[k]) for k in self.obs_space}
     rep_prevact = {k: data[k][:, K - 1: -1] for k in self.act_space}
