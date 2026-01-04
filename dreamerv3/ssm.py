@@ -12,11 +12,16 @@ import numpy as np
 f32 = jnp.float32
 sg = jax.lax.stop_gradient
 
-from embodied.jax.nets import Transformer as TransformerOrig
+from embodied.jax.nets import Transformer
 
 
-class RSSM(nj.Module):
+concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
+prepend = lambda x, y: jnp.concatenate([x, y], 1)
 
+
+class AbstractSSM(nj.Module):
+
+  # base fields
   deter: int = 4096
   hidden: int = 2048
   stoch: int = 32
@@ -30,81 +35,136 @@ class RSSM(nj.Module):
   obslayers: int = 1
   dynlayers: int = 1
   absolute: bool = False
-  blocks: int = 8
   free_nats: float = 1.0
-  use_transformer: bool = True
-  max_context_length: int = 63
 
   def __init__(self, act_space, **kw):
     self.act_space = act_space
     self.kw = kw
-    if self.use_transformer:
-      self._core = self._core_transformer
-      self.observe = self.observe_transdreamer
-      self.n_transformer_layers = 6
-    else:
-      assert self.deter % self.blocks == 0
+
+  def _deter_out_dim(self):
+    raise NotImplementedError
 
   @property
   def entry_space(self):
-    deter = self.deter * self.n_transformer_layers
+    deter = self._deter_out_dim()
     return dict(
         deter=elements.Space(np.float32, deter),
         stoch=elements.Space(np.float32, (self.stoch, self.classes)))
 
-  def initial(self, bsize):
-    deter = self.deter * self.n_transformer_layers
+  def _initial(self, bsize: int, context_size: int = None):
+    deter = self._deter_out_dim()
+    shape = [bsize,]
+    if context_size is not None:
+        shape.append(context_size)
+
     carry = nn.cast(dict(
-        deter=jnp.zeros([bsize, self.max_context_length ,deter], f32),
-        stoch=jnp.zeros([bsize, self.max_context_length, self.stoch, self.classes], f32)))
-    return carry
+        deter=jnp.zeros([*shape, deter], f32),
+        stoch=jnp.zeros([*shape, self.stoch, self.classes], f32)))
+
+    zeros = lambda x: jnp.zeros([*shape, *x.shape], x.dtype)
+    action = jax.tree.map(zeros, self.act_space)
+
+    return carry, action
+
+  def initial(self, bsize: int):
+    return self._initial(bsize)
+
+  def initial_with_context(self, bsize: int):
+    return self._initial(bsize, context_size=self.max_context_length)
 
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 3, entries['deter'].shape
     carry = jax.tree.map(lambda x: x[:, -1], entries)
     return carry
 
-  def starts(self, entries, carry, nlast):
+  def starts(self, entries, carry, actions, nlast):
+    raise NotImplementedError
+
+  def observe(self, carry, tokens, action, reset, training, single=False):
+    raise NotImplementedError
+
+  def imagine(self, carry, policy, length, training, single=False):
+    raise NotImplementedError
+
+  def loss(self, carry, tokens, acts, reset, training):
+    metrics = {}
+    carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
+    prior_logit = self._logit('imglogit', feat['deter'], self.imglayers)
+    post_logit = feat['logit']
+    dyn = self._dist(sg(post_logit)).kl(self._dist(prior_logit))
+    rep = self._dist(post_logit).kl(self._dist(sg(prior_logit)))
+    if self.free_nats:
+      dyn = jnp.maximum(dyn, self.free_nats)
+      rep = jnp.maximum(rep, self.free_nats)
+    losses = {'dyn': dyn, 'rep': rep}
+    metrics['dyn_ent'] = self._dist(prior_logit).entropy().mean()
+    metrics['rep_ent'] = self._dist(post_logit).entropy().mean()
+    return carry, entries, losses, feat, metrics
+
+  def _core(self, deter, stoch, action, training):
+    raise NotImplementedError
+
+  def _logit(self, name, feat, n_layers):
+    x = feat
+    for i in range(n_layers):
+      x = self.sub(f'{name}_logit{i}', nn.Linear, self.hidden, **self.kw)(x)
+      x = nn.act(self.act)(self.sub(f'{name}_logit{i}norm', nn.Norm, self.norm)(x))
+    return self._stoch_logit(f'{name}_stochlogit', x)
+
+  def _stoch_logit(self, name, x):
+    kw = dict(**self.kw, outscale=self.outscale)
+    x = self.sub(name, nn.Linear, self.stoch * self.classes, **kw)(x)
+    return x.reshape(x.shape[:-1] + (self.stoch, self.classes))
+
+  def _dist(self, logits):
+    out = embodied.jax.outs.OneHot(logits, self.unimix)
+    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
+    return out
+
+
+class RSSM(AbstractSSM):
+
+  # base fields
+  deter: int = 4096
+  hidden: int = 2048
+  stoch: int = 32
+  classes: int = 32
+  norm: str = 'rms'
+  act: str = 'gelu'
+  unroll: bool = False
+  unimix: float = 0.01
+  outscale: float = 1.0
+  imglayers: int = 2
+  obslayers: int = 1
+  dynlayers: int = 1
+  absolute: bool = False
+  free_nats: float = 1.0
+
+  # rssm fields
+  blocks: int = 8
+
+  def __init__(self, act_space, **kw):
+    super().__init__(act_space, **kw)
+    self.max_context_length = 1
+    assert self.deter % self.blocks == 0
+
+  def _deter_out_dim(self):
+    return self.deter
+
+  def starts(self, entries, carry, actions, nlast):
     B = len(jax.tree.leaves(carry)[0])
     return jax.tree.map(
         lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
 
-  def observe_transdreamer(self, carry, tokens, action, reset, training, single=False):
-    # TODO: handle reset
-    carry, tokens, action = nn.cast((carry, tokens, action))
-    # Check if the input is a single observation or history
-    # single observation shape: (n_envs, token_dim)
-    # history shape: (n_envs, context_length, token_dim)
-    assert len(tokens.shape) in (2, 3), f'shape={tokens.shape}'
-    single = len(tokens.shape) == 2
-    if single:
-      tokens = tokens[:, None]
-
-    action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
-    post = self._prior('posterior_transdreamer', tokens)
-    post_stoch = nn.cast(self._dist(post).sample(seed=nj.seed()))
-    prev_states = jnp.concatenate([carry['stoch'][:, None], post_stoch[:, :-1]], axis=1)
-    # TODO: Can we get rid of trimming action? prev_states and action should always have max_context_length
-    deter = self._core(None, prev_states, action[:, -prev_states.shape[1]:])
-    # prior = self._prior('prior_transdreamer', deter)
-    # dyn = self._dist(sg(post)).kl(self._dist(prior))
-    # rep = self._dist(post).kl(self._dist(sg(prior)))
-    entries = {'deter': deter, 'stoch': post_stoch}
-    feat = dict(entries)
-    feat['logit'] = post
-    carry = {'deter': entries['deter'][:, -1], 'stoch': entries['stoch'][:, -1]}
-    # if single:
-    #   entries = {k: v[:, 0] for k, v in entries.items()}
-    #   feat = {k: v[:, 0] for k, v in feat.items()}
-
-    return carry, entries, feat
-
   def observe(self, carry, tokens, action, reset, training, single=False):
+    assert self.max_context_length == 1, f'RSSM: assume that max_context_length == 1: {(self.max_context_length, 1)}'
     carry, tokens, action = nn.cast((carry, tokens, action))
     if single:
+      carry = jax.tree.map(lambda x: x[:, 0], carry)
+      action = jax.tree.map(lambda x: x[:, 0], action)
       carry, (entry, feat) = self._observe(
           carry, tokens, action, reset, training)
-      return carry, entry, feat
+      return jax.tree.map(lambda x: x[:, None], carry), entry, feat
     else:
       unroll = jax.tree.leaves(tokens)[0].shape[1] if self.unroll else 1
       carry, (entries, feat) = nj.scan(
@@ -118,63 +178,27 @@ class RSSM(nj.Module):
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
-    deter = self._core(deter, stoch, action)
+    deter = self._core(deter, stoch, action, training)
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
-    for i in range(self.obslayers):
-      x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
-      x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
-    logit = self._logit('obslogit', x)
-    stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
-    carry = dict(deter=deter, stoch=stoch)
-    feat = dict(deter=deter, stoch=stoch, logit=logit)
-    entry = dict(deter=deter, stoch=stoch)
-    assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
+    post_logit = self._logit('obslogit', x, self.obslayers)
+    post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
+    carry = dict(deter=deter, stoch=post_stoch)
+    feat = dict(deter=deter, stoch=post_stoch, logit=post_logit)
+    entry = dict(deter=deter, stoch=post_stoch)
+    assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, post_stoch, post_logit))
     return carry, (entry, feat)
-
-  def imagine_transformer(self, carry, policy, length, training, single=False):
-    if single:
-      state_context, action_context = carry
-      current_state = {'deter': state_context['deter'][:, -1], 'stoch': state_context['stoch'][:, -1]}
-      action = policy(sg(current_state)) if callable(policy) else policy
-      action_context = jnp.concatenate([action_context, action['action'][:, None]], axis=1)[:, -state_context['stoch'].shape[1]:]
-      actemb = nn.DictConcat(self.act_space, 1)({'action': action_context})
-      deter = self._core(state_context['deter'], state_context['stoch'], actemb)[:, -1:]
-      logit = self._prior('prior', deter)
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
-      state_context = {
-          'deter': jnp.concatenate([state_context['deter'], deter], axis=1)[:, -self.max_context_length:],
-          'stoch': jnp.concatenate([state_context['stoch'], stoch], axis=1)[:, -self.max_context_length:],
-      }
-      carry = state_context, action_context
-      feat = nn.cast(dict(deter=deter[:, 0], stoch=stoch[:, 0], logit=logit[:, 0]))
-      assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
-      return carry, (feat, action)
-    else:
-      unroll = length if self.unroll else 1
-      if callable(policy):
-        carry, (feat, action) = nj.scan(
-            lambda c, _: self.imagine_transformer(c, policy, 1, training, single=True),
-            nn.cast(carry), (), length, unroll=unroll, axis=1)
-      else:
-        carry, (feat, action) = nj.scan(
-            lambda c, a: self.imagine_transformer(c, a, 1, training, single=True),
-            nn.cast(carry), nn.cast(policy), length, unroll=unroll, axis=1)
-      # We can also return all carry entries but it might be expensive.
-      # entries = dict(deter=feat['deter'], stoch=feat['stoch'])
-      # return carry, entries, feat, action
-      return carry, feat, action
 
   def imagine(self, carry, policy, length, training, single=False):
     if single:
       action = policy(sg(carry)) if callable(policy) else policy
       actemb = nn.DictConcat(self.act_space, 1)(action)
-      deter = self._core(carry['deter'], carry['stoch'], actemb)
-      logit = self._prior('prior', deter)
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
-      carry = nn.cast(dict(deter=deter, stoch=stoch))
-      feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
-      assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
+      deter = self._core(carry['deter'], carry['stoch'], actemb, training)
+      prior_logit = self._logit('imglogit', deter, self.imglayers)
+      prior_stoch = nn.cast(self._dist(prior_logit).sample(seed=nj.seed()))
+      carry = nn.cast(dict(deter=deter, stoch=prior_stoch))
+      feat = nn.cast(dict(deter=deter, stoch=prior_stoch, logit=prior_logit))
+      assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, prior_stoch, prior_logit))
       return carry, (feat, action)
     else:
       unroll = length if self.unroll else 1
@@ -191,22 +215,7 @@ class RSSM(nj.Module):
       # return carry, entries, feat, action
       return carry, feat, action
 
-  def loss(self, carry, tokens, acts, reset, training):
-    metrics = {}
-    carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
-    prior = self._prior('prior', feat['deter'])
-    post = feat['logit']
-    dyn = self._dist(sg(post)).kl(self._dist(prior))
-    rep = self._dist(post).kl(self._dist(sg(prior)))
-    if self.free_nats:
-      dyn = jnp.maximum(dyn, self.free_nats)
-      rep = jnp.maximum(rep, self.free_nats)
-    losses = {'dyn': dyn, 'rep': rep}
-    metrics['dyn_ent'] = self._dist(prior).entropy().mean()
-    metrics['rep_ent'] = self._dist(post).entropy().mean()
-    return carry, entries, losses, feat, metrics
-
-  def _core(self, deter, stoch, action):
+  def _core(self, deter, stoch, action, training):
     stoch = stoch.reshape((stoch.shape[0], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     g = self.blocks
@@ -232,47 +241,160 @@ class RSSM(nj.Module):
     deter = update * cand + (1 - update) * deter
     return deter
 
-  def _core_transformer(self, deter, stoch, action):
-    # TODO: check transformer implementation
-    # TODO: should operate on context
-    # single = len(stoch.shape) == 3
-    # if single:
-    #   stoch = stoch[:, None]
-    #   action = action[:, None]
 
+class TSSM(AbstractSSM):
+
+  # base fields
+  deter: int = 4096
+  hidden: int = 2048
+  stoch: int = 32
+  classes: int = 32
+  norm: str = 'rms'
+  act: str = 'gelu'
+  unroll: bool = False
+  unimix: float = 0.01
+  outscale: float = 1.0
+  imglayers: int = 2
+  obslayers: int = 1
+  dynlayers: int = 1
+  absolute: bool = False
+  free_nats: float = 1.0
+
+  # tssm fields
+  max_context_length: int = 64
+  transformer_layers: int = 6
+  transformer_heads: int = 8
+  transformer_ffup: int = 4
+  transformer_act: str = 'silu'
+  transformer_norm: str = 'rms'
+  transformer_glu: bool = False
+  transformer_rope: bool = True
+  transformer_qknorm: str = 'none'
+  transformer_bias: bool = True
+  transformer_outscale: float = 1.0
+  transformer_concatenate_over_layers: bool = True
+  transformer_normalize_out: bool = False
+  transformer_dropout: float = 0.0
+
+  def __init__(self, act_space, **kw):
+      super().__init__(act_space, **kw)
+
+  def _deter_out_dim(self):
+    if self.transformer_concatenate_over_layers:
+      return self.deter * self.transformer_layers
+
+    return self.deter
+
+  @staticmethod
+  def _zeros_like_expanded(array, n):
+    B, _, *shape = array.shape
+    return jnp.zeros((B, n, *shape), dtype=array.dtype)
+
+  @staticmethod
+  def _sliding_window_view_2d(array, window_size, flatten_batch_axes=True):
+    n_windows = array.shape[1] - window_size + 1
+    idx = jnp.arange(n_windows)[:, None] + jnp.arange(window_size)
+    result = array[:, idx]
+    if flatten_batch_axes:
+      B, T, *shape = result.shape
+      return result.reshape(B * T, *shape)
+
+    return result
+
+  def starts(self, entries, carry, actions, nlast):
+    assert nlast > 0, (nlast, 0)
+    pad_length = self.max_context_length - 1
+    pad = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length), entries)
+    entries = concat([pad, jax.tree.map(lambda x: x[:, -nlast:], entries)], 1)
+    state_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), entries)
+
+    pad_action = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length + 1), actions)
+    actions = concat([pad_action, jax.tree.map(lambda x: x[:, x.shape[1] - nlast + 1:x.shape[1]], actions)], 1)
+    action_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), actions)
+
+    imagination_carry = (state_starts, action_starts['action'])
+
+    return imagination_carry
+
+  def observe(self, carry, tokens, action, reset, training, single=False):
+    # TODO: handle reset via causal masking
+    carry, tokens, action = nn.cast((carry, tokens, action))
+    action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
+    post_logit = self._logit('obslogit', tokens, self.obslayers)
+    post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
+
+    if single:
+      assert not training
+      # Currently this mode is used only in agent.policy()
+      # Assume that carry and action contain the context data for transformer inference
+      deter = self._core(None, carry['stoch'], action, training)
+      carry['stoch'] = prepend(carry['stoch'][:, :-1], post_stoch[:, None])
+      carry['deter'] = deter
+      entries = {'deter': deter[:, -1], 'stoch': post_stoch}
+      feat = dict(entries)
+      feat['logit'] = post_logit
+      return carry, entries, feat
+
+    # This mode is used for training and reporting
+    # carry contains 'deter' and 'stoch' from the previous time step
+    prev_post_stoch = prepend(carry['stoch'][:, None], post_stoch[:, :-1])
+    deter = self._core(None, prev_post_stoch, action, training)
+    carry['stoch'] = post_stoch[:, -1]
+    carry['deter'] = deter[:, -1]
+    entries = {'deter': deter, 'stoch': post_stoch}
+    feat = dict(entries)
+    feat['logit'] = post_logit
+
+    return carry, entries, feat
+
+  def imagine(self, carry, policy, length, training, single=False):
+    if single:
+      state_context, action_context = carry
+      current_state = jax.tree.map(lambda x: x[:, -1], state_context)
+      action = policy(sg(current_state)) if callable(policy) else policy
+      action_context = prepend(action_context[:, :-1], action['action'][:, None])
+      actemb = nn.DictConcat(self.act_space, 1)({'action': action_context})
+      deter = self._core(None, state_context['stoch'], actemb, training)
+      current_prior_logit = self._logit('imglogit', deter[:, -1], self.imglayers)
+      current_prior_stoch = nn.cast(self._dist(current_prior_logit).sample(seed=nj.seed()))
+      state_context['deter'] = deter
+      state_context['stoch'] = prepend(state_context['stoch'][:, :-1], current_prior_stoch[:, None])
+      carry = state_context, action_context
+      feat = nn.cast(dict(deter=deter[:, -1], stoch=current_prior_stoch, logit=current_prior_logit))
+      assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, current_prior_stoch, current_prior_logit))
+      return carry, (feat, action)
+    else:
+      unroll = length if self.unroll else 1
+      if callable(policy):
+        carry, (feat, action) = nj.scan(
+            lambda c, _: self.imagine(c, policy, 1, training, single=True),
+            nn.cast(carry), (), length, unroll=unroll, axis=1)
+      else:
+        carry, (feat, action) = nj.scan(
+            lambda c, a: self.imagine(c, a, 1, training, single=True),
+            nn.cast(carry), nn.cast(policy), length, unroll=unroll, axis=1)
+      # We can also return all carry entries but it might be expensive.
+      # entries = dict(deter=feat['deter'], stoch=feat['stoch'])
+      # return carry, entries, feat, action
+      return carry, feat, action
+
+  def _core(self, deter, stoch, action, training):
+    # TODO: check transformer implementation: number of layer, dimensions and so on
     stoch = stoch.reshape((stoch.shape[0], stoch.shape[1], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     x = jnp.concatenate([stoch, action], -1)
     x = self.sub('img_in', nn.Linear, self.deter)(x)
-    # deter = self.sub('transformer', Transformer, d_model_inner=64,
-    #     num_heads=8, feed_forward_dim=self.deter, num_layers=6,
-    #         kw={'act':'none'})(x, deter)
-    # x = jnp.concatenate([deter, x], axis=-1)
-    deter = self.sub('transformer', TransformerOrig, layers=6, units=self.deter)(x)
-    # if single:
-    #   deter = deter[:, 0]
-
-    # if deter.shape[-2] == 1:
-    #   print()
+    transformer_init_kwargs = {
+        'units': self.deter, 'layers': self.transformer_layers, 'heads': self.transformer_heads,
+        'ffup': self.transformer_ffup, 'act': self.transformer_act, 'norm': self.transformer_norm,
+        'glu': self.transformer_glu, 'rope': self.transformer_rope, 'qknorm': self.transformer_qknorm,
+        'bias': self.transformer_bias, 'outscale': self.transformer_outscale,
+        'concatenate_over_layers': self.transformer_concatenate_over_layers,
+        'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
+    }
+    deter = self.sub('transformer', Transformer, **transformer_init_kwargs)(x, training=training)
 
     return deter
-
-  def _prior(self, name, feat):
-    x = feat
-    for i in range(self.imglayers):
-      x = self.sub(f'{name}_prior{i}', nn.Linear, self.hidden, **self.kw)(x)
-      x = nn.act(self.act)(self.sub(f'{name}_prior{i}norm', nn.Norm, self.norm)(x))
-    return self._logit(f'{name}_priorlogit', x)
-
-  def _logit(self, name, x):
-    kw = dict(**self.kw, outscale=self.outscale)
-    x = self.sub(name, nn.Linear, self.stoch * self.classes, **kw)(x)
-    return x.reshape(x.shape[:-1] + (self.stoch, self.classes))
-
-  def _dist(self, logits):
-    out = embodied.jax.outs.OneHot(logits, self.unimix)
-    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
-    return out
 
 
 class Encoder(nj.Module):
@@ -456,94 +578,3 @@ class Decoder(nj.Module):
 
     entries = {}
     return carry, entries, recons
-
-
-class MultiHeadSelfAttention(nj.Module):
-  def __init__(self, d_model_inner, num_heads, kw):
-    self.d_model_inner = d_model_inner
-    self.num_heads = num_heads
-    self._kw = kw
-    self.head_dim = self.d_model_inner // self.num_heads
-    self.hidden = self.d_model_inner * self.num_heads
-
-  def __call__(self, x):
-    batch_size, embed_dim = x.shape
-
-    # Create queries, keys, values
-    query = self.sub('linear1_M', nn.Linear, self.hidden)(x)
-    query = query.reshape(batch_size, -1, self.num_heads, self.head_dim)
-    key = self.sub('linear2_M', nn.Linear, self.hidden)(x)
-    key = key.reshape(batch_size, -1, self.num_heads, self.head_dim)
-    value = self.sub('linear3_M', nn.Linear, self.hidden)(x)
-    value = value.reshape(batch_size, -1, self.num_heads, self.head_dim)
-
-    # Calculate attention scores
-    scores = jnp.einsum('bqhd,bkhd->bhqk', query, key) / jnp.sqrt(self.head_dim)
-    weights = jax.nn.softmax(scores, axis=-1)
-
-    # Apply attention to value
-    attention_output = jnp.einsum('bhqk,bkhd->bqhd', weights, value).reshape(batch_size, -1, self.hidden)
-
-    # Final dense layer
-    output = self.sub('linear4_M', nn.Linear, embed_dim)(attention_output)
-    output = output.reshape(1, batch_size, -1).squeeze(0)
-    return output
-
-
-class TransformerLayer(nj.Module):
-
-  def __init__(self, d_model_inner, num_heads, feed_forward_dim, kw):
-    self.d_model_inner = d_model_inner
-    self.num_heads = num_heads
-    self.feed_forward_dim = feed_forward_dim
-    self._kw = kw
-
-  def __call__(self, x):
-    batch_size, embed_dim = x.shape
-    # Multi-head self-attention
-    attn_output = self.sub('MultiHeadSelfAttention', MultiHeadSelfAttention,
-            self.d_model_inner, self.num_heads, self._kw)(x)
-
-    attn_output = self.sub('layernorm1_TL', nn.Norm, 'layer')(x + attn_output)
-
-    # Feed-forward
-    ff_output = self.sub('linear1_TL', nn.Linear, self.feed_forward_dim)(attn_output)
-    ff_output = jax.nn.relu(ff_output)
-    ff_output = self.sub('linear2_TL', nn.Linear, embed_dim)(ff_output)
-    ff_output = self.sub('layernorm2_TL', nn.Norm, 'layer')(attn_output + ff_output)
-    ff_output = ff_output.reshape(1, batch_size, -1).squeeze(0)
-    return ff_output
-
-# class PositionalEmbedding(nj.Module):
-#   def __init__(self, d_model=600):
-#     self.d_model = d_model
-
-#   def __call__(self, positions):
-#       # Initialize the frequencies
-#       inv_freq = 1 / (10000 ** (jnp.arange(0.0, self.dim, 2.0) / self.dim))
-
-#       # Calculate the positional embeddings
-#       sinusoid_inp = jnp.einsum("i,j->ij", positions.astype(jnp.float32), inv_freq)
-#       pos_emb = jnp.concatenate([jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)], axis=-1)
-#       return pos_emb[:, None, :]
-
-class Transformer(nj.Module):
-  def __init__(self, d_model_inner=64, num_heads=8, feed_forward_dim=512, num_layers=6, kw=None):
-    self.d_model_inner = d_model_inner
-    self.num_heads = num_heads
-    self.feed_forward_dim = feed_forward_dim
-    self.num_layers = num_layers
-    self._kw = kw
-
-  def __call__(self, x, deter):
-    x = jnp.concatenate([deter, x], axis=-1)
-
-    # Transformer layers
-    for _ in range(self.num_layers):
-      x = self.sub('TransformerLayer', TransformerLayer, self.d_model_inner,
-            self.num_heads, self.feed_forward_dim, self._kw)(x)
-
-    # Add an additional Dense layer to project down to the desired size
-    x = self.sub('linear2_T', nn.Linear, deter.shape[1])(x)
-
-    return x

@@ -2,18 +2,18 @@ import time
 
 import cloudpickle
 import elements
+import jax.numpy as jnp
 import numpy as np
 import portal
 
 
 class Driver:
 
-  def __init__(self, make_env_fns, max_context_length, parallel=True, **kwargs):
+  def __init__(self, make_env_fns, parallel=True, **kwargs):
     assert len(make_env_fns) >= 1
     self.parallel = parallel
     self.kwargs = kwargs
     self.length = len(make_env_fns)
-    self.max_context_length = max_context_length
     if parallel:
       import multiprocessing as mp
       context = mp.get_context()
@@ -73,9 +73,10 @@ class Driver:
         list(outs.keys()), list(acts.keys()))
     if obs['is_last'].any():
       mask = ~obs['is_last']
-      # TODO: recreate action context for environment witch is to be reseted
       acts = {k: self._mask(v, mask) for k, v in acts.items()}
-      self.carry[3]['action'] = [int(m) * action for m, action in zip(mask, self.carry[3]['action'])]
+      # TODO: recreate carry (action, deter, stoch) for environment witch is to be reseted
+      mask = jnp.asarray(mask)
+      self.carry[3]['action'] = [action * m.astype(action.dtype) for m, action in zip(mask, self.carry[3]['action'])]
     self.acts = {**acts, 'reset': obs['is_last'].copy()}
     trans = {**obs, **acts, **outs, **logs}
     for i in range(self.length):

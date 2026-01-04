@@ -602,10 +602,13 @@ class Transformer(nj.Module):
   winit: str | Callable = Initializer('trunc_normal')
   binit: str | Callable = Initializer('zeros')
   outscale: float = 1.0
+  concatenate_over_layers: bool = True
+  normalize_out: bool = False
+  dropout: float = 0.0
 
   def __call__(self, x, mask=None, ts=None, training=True):
     kw = {k: getattr(self, k) for k in ('bias', 'winit', 'binit')}
-    ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale')}
+    ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale', 'dropout')}
     D = x.shape[-1]
     assert D == self.units, (D, self.units)
     out = []
@@ -629,9 +632,14 @@ class Transformer(nj.Module):
           x = ff2(act(self.act)(ff1(x)))
         x += skip
         out.append(x)
-    x = jnp.stack(out, axis=2)
-    x = x.reshape((x.shape[0], x.shape[1], -1))
-    # x = self.sub('outnorm', Norm, self.norm)(x)
+
+    if self.concatenate_over_layers:
+      x = jnp.stack(out, axis=2)
+      x = x.reshape((x.shape[0], x.shape[1], -1))
+
+    if self.normalize_out:
+      x = self.sub('outnorm', Norm, self.norm)(x)
+
     return x
 
 

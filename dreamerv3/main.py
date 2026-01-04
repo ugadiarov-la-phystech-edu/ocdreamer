@@ -65,7 +65,6 @@ def main(argv=None):
       consec_train=config.consec_train,
       consec_report=config.consec_report,
       replay_context=config.replay_context,
-      max_context_length=config.agent.dyn.rssm.max_context_length,
   )
 
   if config.script == 'train':
