@@ -73,11 +73,34 @@ class AbstractSSM(nj.Module):
   def initial_with_context(self, bsize: int):
     return self._initial(bsize, context_size=self.max_context_length)
 
-  def causal_mask(self, bsize: int):
-    zeros = jnp.zeros((bsize, self.max_context_length, self.max_context_length), dtype=i32)
-    i = jnp.arange(self.max_context_length, dtype=i32)
-    eye = zeros.at[:, i, i].set(1)
-    return eye
+  def _max_context_causal_mask(self, bsize: int, length: int):
+    simple_mask = jnp.tril(jnp.ones((bsize, length, length), dtype=i32))
+    i = jnp.arange(length)[:, None]
+    j = jnp.arange(length)[None, :]
+
+    # mask out dependencies longer than max_context_length
+    max_context_mask = (i - j < self.max_context_length) & (i >= j)
+
+    return simple_mask * max_context_mask.astype(simple_mask.dtype)[None]
+
+  def causal_mask(self, is_last):
+    B, T = is_last.shape[:2]
+    rows = jnp.arange(T)[:, None]
+    cols = jnp.arange(T)[None, :]
+    idx = jnp.arange(T)
+
+    # region[row, i, column] = (row >= i) & (column < i)
+    region = (rows[:, None, :] >= idx[None, :, None]) & (cols[None, :, :] < idx[None, :, None])
+
+    # episode_separation_mask is used to enforce this rule:
+    # the steps of subsequent episodes do not depend on the steps of the current episode and prediction from the last
+    # step of the current episode is used for initialization the first step of the next episode, i.e.:
+    # episode_end_index = jnp.where(is_last == 1)[0]
+    # mask[episode_end_index:, :episode_end_index] = 0
+    episode_separation_mask = jnp.any(region[None, :, :, :] & (is_last[:, None, :, None] == 1), axis=2)
+    max_context_causal_mask = self._max_context_causal_mask(B, T)
+
+    return jnp.where(episode_separation_mask, 0, max_context_causal_mask)
 
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 3, entries['deter'].shape
@@ -87,15 +110,15 @@ class AbstractSSM(nj.Module):
   def starts(self, entries, carry, actions, nlast):
     raise NotImplementedError
 
-  def observe(self, carry, tokens, action, is_first, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
     raise NotImplementedError
 
   def imagine(self, carry, policy, length, training, single=False):
     raise NotImplementedError
 
-  def loss(self, carry, tokens, acts, reset, training):
+  def loss(self, carry, tokens, acts, is_last, reset, training):
     metrics = {}
-    carry, entries, feat = self.observe(carry, tokens, acts, None, reset, training)
+    carry, entries, feat = self.observe(carry, tokens, acts, is_last, reset, training)
     prior_logit = self._logit('imglogit', feat['deter'], self.imglayers)
     post_logit = feat['logit']
     dyn = self._dist(sg(post_logit)).kl(self._dist(prior_logit))
@@ -108,7 +131,7 @@ class AbstractSSM(nj.Module):
     metrics['rep_ent'] = self._dist(post_logit).entropy().mean()
     return carry, entries, losses, feat, metrics
 
-  def _core(self, deter, stoch, action, training):
+  def _core(self, deter, stoch, action, is_last, training):
     raise NotImplementedError
 
   def _logit(self, name, feat, n_layers):
@@ -163,7 +186,7 @@ class RSSM(AbstractSSM):
     return jax.tree.map(
         lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
 
-  def observe(self, carry, tokens, action, is_first, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
     assert self.max_context_length == 1, f'RSSM: assume that max_context_length == 1: {(self.max_context_length, 1)}'
     carry, tokens, action = nn.cast((carry, tokens, action))
     if single:
@@ -180,12 +203,12 @@ class RSSM(AbstractSSM):
           carry, (tokens, action, reset), unroll=unroll, axis=1)
       return carry, entries, feat
 
-  def _observe(self, carry, tokens, action, reset, training):
+  def _observe(self, carry, tokens, action, is_last, reset, training):
     deter, stoch, action = nn.mask(
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
-    deter = self._core(deter, stoch, action, training)
+    deter = self._core(deter, stoch, action, None, training)
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     post_logit = self._logit('obslogit', x, self.obslayers)
@@ -200,7 +223,7 @@ class RSSM(AbstractSSM):
     if single:
       action = policy(sg(carry)) if callable(policy) else policy
       actemb = nn.DictConcat(self.act_space, 1)(action)
-      deter = self._core(carry['deter'], carry['stoch'], actemb, training)
+      deter = self._core(carry['deter'], carry['stoch'], actemb, None, training)
       prior_logit = self._logit('imglogit', deter, self.imglayers)
       prior_stoch = nn.cast(self._dist(prior_logit).sample(seed=nj.seed()))
       carry = nn.cast(dict(deter=deter, stoch=prior_stoch))
@@ -222,7 +245,7 @@ class RSSM(AbstractSSM):
       # return carry, entries, feat, action
       return carry, feat, action
 
-  def _core(self, deter, stoch, action, training):
+  def _core(self, deter, stoch, action, is_last, training):
     stoch = stoch.reshape((stoch.shape[0], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     g = self.blocks
@@ -315,26 +338,34 @@ class TSSM(AbstractSSM):
     entries = concat([pad, jax.tree.map(lambda x: x[:, -nlast:], entries)], 1)
     state_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), entries)
 
+    # do not use last step masking during imagination
+    is_last = jnp.zeros(actions['action'].shape[:2], dtype=i32)
+    pad_is_last = jnp.ones((is_last.shape[0], pad_length), dtype=is_last.dtype)
+    is_last = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), prepend(pad_is_last, is_last))
+
     pad_action = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length + 1), actions)
     actions = concat([pad_action, jax.tree.map(lambda x: x[:, x.shape[1] - nlast + 1:x.shape[1]], actions)], 1)
     action_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), actions)
 
-    imagination_carry = (state_starts, action_starts['action'])
+    imagination_carry = (state_starts, action_starts['action'], is_last)
 
     return imagination_carry
 
-  def observe(self, carry, tokens, action, is_first, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
     # TODO: handle reset via causal masking
-    carry, tokens, action = nn.cast((carry, tokens, action))
+    carry, tokens, action, is_last = nn.cast((carry, tokens, action, is_last['is_last']))
     action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
     post_logit = self._logit('obslogit', tokens, self.obslayers)
     post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
+    mask_last_steps = lambda x: x * (1 - jnp.expand_dims(is_last, range(len(is_last.shape), len(x.shape))))
+    action = jax.tree.map(mask_last_steps, action)
 
     if single:
       assert not training
       # Currently this mode is used only in agent.policy()
       # Assume that carry and action contain the context data for transformer inference
-      deter = self._core(None, carry['stoch'], action, training)
+      carry = jax.tree.map(mask_last_steps, carry)
+      deter = self._core(None, carry['stoch'], action, is_last, training)
       carry['stoch'] = prepend(carry['stoch'][:, 1:], post_stoch[:, None])
       carry['deter'] = deter
       entries = {'deter': deter[:, -1], 'stoch': post_stoch}
@@ -345,7 +376,8 @@ class TSSM(AbstractSSM):
     # This mode is used for training and reporting
     # carry contains 'deter' and 'stoch' from the previous time step
     prev_post_stoch = prepend(carry['stoch'][:, None], post_stoch[:, :-1])
-    deter = self._core(None, prev_post_stoch, action, training)
+    prev_post_stoch = jax.tree.map(mask_last_steps, prev_post_stoch)
+    deter = self._core(None, prev_post_stoch, action, is_last, training)
     carry['stoch'] = post_stoch[:, -1]
     carry['deter'] = deter[:, -1]
     entries = {'deter': deter, 'stoch': post_stoch}
@@ -356,17 +388,18 @@ class TSSM(AbstractSSM):
 
   def imagine(self, carry, policy, length, training, single=False):
     if single:
-      state_context, action_context = carry
+      state_context, action_context, is_last = carry
       current_state = jax.tree.map(lambda x: x[:, -1], state_context)
       action = policy(sg(current_state)) if callable(policy) else policy
       action_context = prepend(action_context[:, 1:], action['action'][:, None])
       actemb = nn.DictConcat(self.act_space, 1)({'action': action_context})
-      deter = self._core(None, state_context['stoch'], actemb, training)
+      deter = self._core(None, state_context['stoch'], actemb, is_last, training)
       current_prior_logit = self._logit('imglogit', deter[:, -1], self.imglayers)
       current_prior_stoch = nn.cast(self._dist(current_prior_logit).sample(seed=nj.seed()))
       state_context['deter'] = deter
       state_context['stoch'] = prepend(state_context['stoch'][:, 1:], current_prior_stoch[:, None])
-      carry = state_context, action_context
+      is_last = prepend(is_last[:, 1:], jnp.zeros_like(is_last[:, :1]))
+      carry = state_context, action_context, is_last
       feat = nn.cast(dict(deter=deter[:, -1], stoch=current_prior_stoch, logit=current_prior_logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, current_prior_stoch, current_prior_logit))
       return carry, (feat, action)
@@ -385,12 +418,15 @@ class TSSM(AbstractSSM):
       # return carry, entries, feat, action
       return carry, feat, action
 
-  def _core(self, deter, stoch, action, training):
+  def _core(self, deter, stoch, action, is_last, training):
     # TODO: check transformer implementation: number of layer, dimensions and so on
+    assert stoch.shape[:2] == is_last.shape[:2], (stoch.shape, is_last.shape)
     stoch = stoch.reshape((*stoch.shape[:2], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     x = jnp.concatenate([stoch, action], -1)
     x = self.sub('img_in', nn.Linear, self.deter)(x)
+    mask = self.causal_mask(is_last)
+
     transformer_init_kwargs = {
         'units': self.deter, 'layers': self.transformer_layers, 'heads': self.transformer_heads,
         'ffup': self.transformer_ffup, 'act': self.transformer_act, 'norm': self.transformer_norm,
@@ -399,7 +435,7 @@ class TSSM(AbstractSSM):
         'concatenate_over_layers': self.transformer_concatenate_over_layers,
         'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
     }
-    deter = self.sub('transformer', Transformer, **transformer_init_kwargs)(x, training=training)
+    deter = self.sub('transformer', Transformer, **transformer_init_kwargs)(x, mask=mask, training=training)
 
     return deter
 
