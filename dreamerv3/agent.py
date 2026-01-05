@@ -167,7 +167,8 @@ class Agent(embodied.jax.Agent):
       outs['replay'] = updates
     # if self.config.replay.fracs.priority > 0:
     #   outs['replay']['priority'] = losses['model']
-    carry = (*carry, {k: data[k][:, -1] for k in self.act_space}, {'is_last': data['is_last'][:, -1]})
+    carry = (*carry, {k: data[k][:, -1] for k in self.act_space},
+             {'is_last': data['is_last'][:, -1].astype(is_last['is_last'].dtype)})
     return carry, outs, metrics
 
   def loss(self, carry, obs, prevact, is_last, training):
@@ -326,7 +327,8 @@ class Agent(embodied.jax.Agent):
       grid = video.transpose((1, 2, 0, 3, 4)).reshape((T, H, B * W, C))
       metrics[f'openloop/{key}'] = grid
 
-    carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space}, {'is_last': data['is_last'][:, -1]})
+    carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space},
+             {'is_last': data['is_last'][:, -1].astype(is_last['is_last'].dtype)})
     return carry, metrics
 
   def _apply_replay_context(self, carry, data):
@@ -334,7 +336,6 @@ class Agent(embodied.jax.Agent):
     carry = (enc_carry, dyn_carry, dec_carry)
     stepid = data['stepid']
     obs = {k: data[k] for k in self.obs_space}
-    # prepend = lambda x, y: jnp.concatenate([x[:, None], y[:, :-1]], 1)
     prevact = {k: prepend(prevact[k][:, None], data[k][:, :-1]) for k in self.act_space}
     is_last = {'is_last': prepend(is_last['is_last'][:, None], data['is_last'][:, :-1])}
     if not self.config.replay_context:

@@ -75,15 +75,15 @@ class AbstractSSM(nj.Module):
 
   def _max_context_causal_mask(self, bsize: int, length: int):
     simple_mask = jnp.tril(jnp.ones((bsize, length, length), dtype=i32))
-    i = jnp.arange(length)[:, None]
-    j = jnp.arange(length)[None, :]
+    rows = jnp.arange(length)[:, None]
+    cols = jnp.arange(length)[None, :]
 
     # mask out dependencies longer than max_context_length
-    max_context_mask = (i - j < self.max_context_length) & (i >= j)
+    max_context_mask = (rows - cols < self.max_context_length) & (rows >= cols)
 
     return simple_mask * max_context_mask.astype(simple_mask.dtype)[None]
 
-  def causal_mask(self, is_last):
+  def _causal_mask(self, is_last):
     B, T = is_last.shape[:2]
     rows = jnp.arange(T)[:, None]
     cols = jnp.arange(T)[None, :]
@@ -93,14 +93,27 @@ class AbstractSSM(nj.Module):
     region = (rows[:, None, :] >= idx[None, :, None]) & (cols[None, :, :] < idx[None, :, None])
 
     # episode_separation_mask is used to enforce this rule:
-    # the steps of subsequent episodes do not depend on the steps of the current episode and prediction from the last
-    # step of the current episode is used for initialization the first step of the next episode, i.e.:
+    # the steps of subsequent episodes do not depend on the steps of the current episode and prediction from the masked
+    # last step of the current episode is used for initialization the first step of the next episode, i.e.:
     # episode_end_index = jnp.where(is_last == 1)[0]
     # mask[episode_end_index:, :episode_end_index] = 0
     episode_separation_mask = jnp.any(region[None, :, :, :] & (is_last[:, None, :, None] == 1), axis=2)
     max_context_causal_mask = self._max_context_causal_mask(B, T)
 
     return jnp.where(episode_separation_mask, 0, max_context_causal_mask)
+
+  @staticmethod
+  def _enumerate_steps(is_last):
+    B, T = is_last.shape
+    absolute_step_idx = jnp.arange(T)[None, :]
+
+    # set is_last[:, 0] = 1 as the algorithm relies on it, this modification does not change the result
+    is_last = jnp.concatenate([jnp.ones((B, 1), dtype=is_last.dtype), is_last[:, 1:]], axis=1)
+
+    # episode steps are counted from the last step of the previous episode as the last step data are masked out and used
+    # for initialization of the first step
+    shift = jax.lax.associative_scan(jnp.maximum, jnp.where(is_last == 1, absolute_step_idx, -1), axis=1)
+    return absolute_step_idx - shift
 
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 3, entries['deter'].shape
@@ -203,7 +216,7 @@ class RSSM(AbstractSSM):
           carry, (tokens, action, reset), unroll=unroll, axis=1)
       return carry, entries, feat
 
-  def _observe(self, carry, tokens, action, is_last, reset, training):
+  def _observe(self, carry, tokens, action, reset, training):
     deter, stoch, action = nn.mask(
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
@@ -352,7 +365,6 @@ class TSSM(AbstractSSM):
     return imagination_carry
 
   def observe(self, carry, tokens, action, is_last, reset, training, single=False):
-    # TODO: handle reset via causal masking
     carry, tokens, action, is_last = nn.cast((carry, tokens, action, is_last['is_last']))
     action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
     post_logit = self._logit('obslogit', tokens, self.obslayers)
@@ -425,7 +437,8 @@ class TSSM(AbstractSSM):
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     x = jnp.concatenate([stoch, action], -1)
     x = self.sub('img_in', nn.Linear, self.deter)(x)
-    mask = self.causal_mask(is_last)
+    mask = self._causal_mask(is_last)
+    episode_step_idx = self._enumerate_steps(is_last)
 
     transformer_init_kwargs = {
         'units': self.deter, 'layers': self.transformer_layers, 'heads': self.transformer_heads,
@@ -435,7 +448,8 @@ class TSSM(AbstractSSM):
         'concatenate_over_layers': self.transformer_concatenate_over_layers,
         'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
     }
-    deter = self.sub('transformer', Transformer, **transformer_init_kwargs)(x, mask=mask, training=training)
+    deter = self.sub('transformer', Transformer, **transformer_init_kwargs)(x, mask=mask, ts=episode_step_idx,
+                                                                            training=training)
 
     return deter
 
