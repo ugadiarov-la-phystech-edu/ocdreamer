@@ -2,7 +2,6 @@ import time
 
 import cloudpickle
 import elements
-import jax.numpy as jnp
 import numpy as np
 import portal
 
@@ -58,7 +57,7 @@ class Driver:
     acts = self.acts
     assert all(len(x) == self.length for x in acts.values())
     assert all(isinstance(v, np.ndarray) for v in acts.values())
-    acts = [{'action': acts['action'][i], 'reset': acts['reset'][i]} for i in range(self.length)]
+    acts = [{k: v[i] for k, v in acts.items()} for i in range(self.length)]
     if self.parallel:
       [pipe.send(('step', act)) for pipe, act in zip(self.pipes, acts)]
       obs = [self._receive(pipe) for pipe in self.pipes]
@@ -74,9 +73,6 @@ class Driver:
     if obs['is_last'].any():
       mask = ~obs['is_last']
       acts = {k: self._mask(v, mask) for k, v in acts.items()}
-      # TODO: recreate carry (action, deter, stoch) for environment witch is to be reseted
-      mask = jnp.asarray(mask)
-      self.carry[3]['action'] = [action * m.astype(action.dtype) for m, action in zip(mask, self.carry[3]['action'])]
     self.acts = {**acts, 'reset': obs['is_last'].copy()}
     trans = {**obs, **acts, **outs, **logs}
     for i in range(self.length):

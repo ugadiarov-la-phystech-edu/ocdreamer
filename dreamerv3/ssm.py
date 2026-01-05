@@ -10,6 +10,7 @@ import ninjax as nj
 import numpy as np
 
 f32 = jnp.float32
+i32 = jnp.int32
 sg = jax.lax.stop_gradient
 
 from embodied.jax.nets import Transformer
@@ -72,6 +73,12 @@ class AbstractSSM(nj.Module):
   def initial_with_context(self, bsize: int):
     return self._initial(bsize, context_size=self.max_context_length)
 
+  def causal_mask(self, bsize: int):
+    zeros = jnp.zeros((bsize, self.max_context_length, self.max_context_length), dtype=i32)
+    i = jnp.arange(self.max_context_length, dtype=i32)
+    eye = zeros.at[:, i, i].set(1)
+    return eye
+
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 3, entries['deter'].shape
     carry = jax.tree.map(lambda x: x[:, -1], entries)
@@ -80,7 +87,7 @@ class AbstractSSM(nj.Module):
   def starts(self, entries, carry, actions, nlast):
     raise NotImplementedError
 
-  def observe(self, carry, tokens, action, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_first, reset, training, single=False):
     raise NotImplementedError
 
   def imagine(self, carry, policy, length, training, single=False):
@@ -88,7 +95,7 @@ class AbstractSSM(nj.Module):
 
   def loss(self, carry, tokens, acts, reset, training):
     metrics = {}
-    carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
+    carry, entries, feat = self.observe(carry, tokens, acts, None, reset, training)
     prior_logit = self._logit('imglogit', feat['deter'], self.imglayers)
     post_logit = feat['logit']
     dyn = self._dist(sg(post_logit)).kl(self._dist(prior_logit))
@@ -156,7 +163,7 @@ class RSSM(AbstractSSM):
     return jax.tree.map(
         lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
 
-  def observe(self, carry, tokens, action, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_first, reset, training, single=False):
     assert self.max_context_length == 1, f'RSSM: assume that max_context_length == 1: {(self.max_context_length, 1)}'
     carry, tokens, action = nn.cast((carry, tokens, action))
     if single:
@@ -316,7 +323,7 @@ class TSSM(AbstractSSM):
 
     return imagination_carry
 
-  def observe(self, carry, tokens, action, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_first, reset, training, single=False):
     # TODO: handle reset via causal masking
     carry, tokens, action = nn.cast((carry, tokens, action))
     action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
@@ -328,7 +335,7 @@ class TSSM(AbstractSSM):
       # Currently this mode is used only in agent.policy()
       # Assume that carry and action contain the context data for transformer inference
       deter = self._core(None, carry['stoch'], action, training)
-      carry['stoch'] = prepend(carry['stoch'][:, :-1], post_stoch[:, None])
+      carry['stoch'] = prepend(carry['stoch'][:, 1:], post_stoch[:, None])
       carry['deter'] = deter
       entries = {'deter': deter[:, -1], 'stoch': post_stoch}
       feat = dict(entries)
@@ -352,13 +359,13 @@ class TSSM(AbstractSSM):
       state_context, action_context = carry
       current_state = jax.tree.map(lambda x: x[:, -1], state_context)
       action = policy(sg(current_state)) if callable(policy) else policy
-      action_context = prepend(action_context[:, :-1], action['action'][:, None])
+      action_context = prepend(action_context[:, 1:], action['action'][:, None])
       actemb = nn.DictConcat(self.act_space, 1)({'action': action_context})
       deter = self._core(None, state_context['stoch'], actemb, training)
       current_prior_logit = self._logit('imglogit', deter[:, -1], self.imglayers)
       current_prior_stoch = nn.cast(self._dist(current_prior_logit).sample(seed=nj.seed()))
       state_context['deter'] = deter
-      state_context['stoch'] = prepend(state_context['stoch'][:, :-1], current_prior_stoch[:, None])
+      state_context['stoch'] = prepend(state_context['stoch'][:, 1:], current_prior_stoch[:, None])
       carry = state_context, action_context
       feat = nn.cast(dict(deter=deter[:, -1], stoch=current_prior_stoch, logit=current_prior_logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, current_prior_stoch, current_prior_logit))
@@ -380,7 +387,7 @@ class TSSM(AbstractSSM):
 
   def _core(self, deter, stoch, action, training):
     # TODO: check transformer implementation: number of layer, dimensions and so on
-    stoch = stoch.reshape((stoch.shape[0], stoch.shape[1], -1))
+    stoch = stoch.reshape((*stoch.shape[:2], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     x = jnp.concatenate([stoch, action], -1)
     x = self.sub('img_in', nn.Linear, self.deter)(x)

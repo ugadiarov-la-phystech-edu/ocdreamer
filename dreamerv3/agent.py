@@ -18,6 +18,7 @@ sg = lambda xs, skip=False: xs if skip else jax.lax.stop_gradient(xs)
 sample = lambda xs: jax.tree.map(lambda x: x.sample(nj.seed()), xs)
 prefix = lambda xs, p: {f'{p}/{k}': v for k, v in xs.items()}
 concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
+prepend = lambda x, y: jnp.concatenate([x, y], 1)
 isimage = lambda s: s.dtype == np.uint8 and len(s.shape) == 3
 
 
@@ -108,7 +109,9 @@ class Agent(embodied.jax.Agent):
         self.enc.initial(batch_size),
         carry,
         self.dec.initial(batch_size),
-        action)
+        action,
+        {'is_last': jnp.ones(action['action'].shape[:2], dtype=i32)},
+    )
 
   def init_train(self, batch_size):
     carry, action = self.dyn.initial(batch_size)
@@ -122,12 +125,12 @@ class Agent(embodied.jax.Agent):
     return self.init_train(batch_size)
 
   def policy(self, carry, obs, mode='train'):
-    (enc_carry, dyn_carry, dec_carry, prevact) = carry
+    (enc_carry, dyn_carry, dec_carry, prevact, is_last) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
     dyn_carry, dyn_entry, feat = self.dyn.observe(
-        dyn_carry, tokens, prevact, reset, **kw)
+        dyn_carry, tokens, prevact, is_last, reset, **kw)
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
@@ -137,8 +140,15 @@ class Agent(embodied.jax.Agent):
     out['finite'] = elements.tree.flatdict(jax.tree.map(
         lambda x: jnp.isfinite(x).all(range(1, x.ndim)),
         dict(obs=obs, carry=carry, tokens=tokens, feat=feat, act=act)))
-    prevact['action'] = jnp.concatenate([prevact['action'][:, :-1], act['action'][:, None]], axis=1)
-    carry = (enc_carry, dyn_carry, dec_carry, prevact)
+
+    prevact['action'] = prepend(prevact['action'][:, 1:], act['action'][:, None])
+    is_last['is_last'] = prepend(is_last['is_last'][:, 1:], obs['is_last'][:, None].astype(is_last['is_last'].dtype))
+
+    mask_last_steps = lambda x: x * (1 - jnp.expand_dims(is_last['is_last'], range(len(is_last['is_last'].shape), len(x.shape))))
+    prevact = jax.tree.map(mask_last_steps, prevact)
+    dyn_carry = jax.tree.map(mask_last_steps, dyn_carry)
+    carry = (enc_carry, dyn_carry, dec_carry, prevact, is_last)
+
     if self.config.replay_context:
       out.update(elements.tree.flatdict(dict(
           enc=enc_entry, dyn=dyn_entry, dec=dec_entry)))
@@ -286,7 +296,7 @@ class Agent(embodied.jax.Agent):
     dyn_carry = jax.tree.map(lambda x: x[:RB], dyn_carry)
     dec_carry = jax.tree.map(lambda x: x[:RB], dec_carry)
     dyn_carry, _, obsfeat = self.dyn.observe(
-        dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact),
+        dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact), None,
         firsthalf(obs['is_first']), training=False)
     imagination_states = jax.tree.map(lambda x: x[:, None], dyn_carry)
     imagination_actions = jax.tree.map(lambda x: x[:, :1], prevact)
@@ -327,8 +337,8 @@ class Agent(embodied.jax.Agent):
     carry = (enc_carry, dyn_carry, dec_carry)
     stepid = data['stepid']
     obs = {k: data[k] for k in self.obs_space}
-    prepend = lambda x, y: jnp.concatenate([x[:, None], y[:, :-1]], 1)
-    prevact = {k: prepend(prevact[k], data[k]) for k in self.act_space}
+    # prepend = lambda x, y: jnp.concatenate([x[:, None], y[:, :-1]], 1)
+    prevact = {k: prepend(prevact[k][:, None], data[k][:, :-1]) for k in self.act_space}
     if not self.config.replay_context:
       return carry, obs, prevact, stepid
 
