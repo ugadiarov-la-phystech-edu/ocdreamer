@@ -616,7 +616,7 @@ class Transformer(nj.Module):
       with nj.scope(f'layer{i}'):
         skip = x
         x = self.sub('norm1', Norm, self.norm)(x)
-        x  = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
+        x = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
         x += skip
         skip = x
         x = self.sub('norm2', Norm, self.norm)(x)

@@ -436,7 +436,7 @@ class TSSM(AbstractSSM):
     stoch = stoch.reshape((*stoch.shape[:2], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     x = jnp.concatenate([stoch, action], -1)
-    x = self.sub('img_in', nn.Linear, self.deter)(x)
+    x = self.sub('dynin', nn.Linear, self.deter)(x)
     mask = self._causal_mask(is_last)
     episode_step_idx = self._enumerate_steps(is_last)
 
