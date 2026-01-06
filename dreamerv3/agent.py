@@ -297,7 +297,7 @@ class Agent(embodied.jax.Agent):
         dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact), firsthalf(is_last),
         firsthalf(obs['is_first']), training=False)
     imagination_states = jax.tree.map(lambda x: x[:, None], dyn_carry)
-    imagination_actions = jax.tree.map(lambda x: x[:, :1], prevact)
+    imagination_actions = jax.tree.map(lambda x: x[:RB, :1], prevact)
     imagination_carry = self.dyn.starts(imagination_states, dyn_carry, imagination_actions, nlast=1)
     _, imgfeat, _ = self.dyn.imagine(
         imagination_carry, secondhalf(prevact), length=T - T // 2, training=False)
