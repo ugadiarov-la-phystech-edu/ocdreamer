@@ -30,6 +30,7 @@ def setup(
     num_processes=1,
     coordinator_address=None,
     compilation_cache=True,
+    mem_fraction=0.8,
 ):
   platform and jax.config.update('jax_platforms', platform)
   jax.config.update('jax_disable_most_optimizations', debug)
@@ -37,6 +38,7 @@ def setup(
   if transfer_guard and jit and not debug_nans and not debug:
     jax.config.update('jax_transfer_guard', 'disallow')
   os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = str(bool(prealloc)).lower()
+  os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(float(mem_fraction))
   jax.config.update('jax_debug_nans', debug_nans)
   jax.config.update('jax_enable_compilation_cache', compilation_cache)
 
