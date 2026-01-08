@@ -10,7 +10,7 @@ import ninjax as nj
 import numpy as np
 import optax
 
-from . import rssm
+from . import ssm
 
 f32 = jnp.float32
 i32 = jnp.int32
@@ -18,6 +18,7 @@ sg = lambda xs, skip=False: xs if skip else jax.lax.stop_gradient(xs)
 sample = lambda xs: jax.tree.map(lambda x: x.sample(nj.seed()), xs)
 prefix = lambda xs, p: {f'{p}/{k}': v for k, v in xs.items()}
 concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
+prepend = lambda x, y: jnp.concatenate([x, y], 1)
 isimage = lambda s: s.dtype == np.uint8 and len(s.shape) == 3
 
 
@@ -39,13 +40,14 @@ class Agent(embodied.jax.Agent):
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
     dec_space = {k: v for k, v in obs_space.items() if k not in exclude}
     self.enc = {
-        'simple': rssm.Encoder,
+        'simple': ssm.Encoder,
     }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
     self.dyn = {
-        'rssm': rssm.RSSM,
+        'rssm': ssm.RSSM,
+        'tssm': ssm.TSSM,
     }[config.dyn.typ](act_space, **config.dyn[config.dyn.typ], name='dyn')
     self.dec = {
-        'simple': rssm.Decoder,
+        'simple': ssm.Decoder,
     }[config.dec.typ](dec_space, **config.dec[config.dec.typ], name='dec')
 
     self.feat2tensor = lambda x: jnp.concatenate([
@@ -83,6 +85,9 @@ class Agent(embodied.jax.Agent):
       scales.pop('lm')
     scales.update({k: rec for k in self.dec.veckeys if k not in scales})
     scales.update({k: rec for k in self.dec.imgkeys if k not in scales})
+    if not self.config.repval_loss:
+      del scales['repval']
+
     self.scales = scales
 
   @property
@@ -102,26 +107,34 @@ class Agent(embodied.jax.Agent):
     return spaces
 
   def init_policy(self, batch_size):
-    zeros = lambda x: jnp.zeros((batch_size, *x.shape), x.dtype)
+    carry, action = self.dyn.initial_with_context(batch_size)
     return (
         self.enc.initial(batch_size),
-        self.dyn.initial(batch_size),
+        carry,
         self.dec.initial(batch_size),
-        jax.tree.map(zeros, self.act_space))
+        action,
+        {'is_last': jnp.ones(action['action'].shape[:2], dtype=i32)},
+    )
 
   def init_train(self, batch_size):
-    return self.init_policy(batch_size)
+    carry, action = self.dyn.initial(batch_size)
+    return (
+        self.enc.initial(batch_size),
+        carry,
+        self.dec.initial(batch_size),
+        action,
+        {'is_last': jnp.ones(action['action'].shape[:1], dtype=i32)})
 
   def init_report(self, batch_size):
-    return self.init_policy(batch_size)
+    return self.init_train(batch_size)
 
   def policy(self, carry, obs, mode='train'):
-    (enc_carry, dyn_carry, dec_carry, prevact) = carry
+    (enc_carry, dyn_carry, dec_carry, prevact, is_last) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
     dyn_carry, dyn_entry, feat = self.dyn.observe(
-        dyn_carry, tokens, prevact, reset, **kw)
+        dyn_carry, tokens, prevact, is_last, reset, **kw)
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
@@ -131,16 +144,20 @@ class Agent(embodied.jax.Agent):
     out['finite'] = elements.tree.flatdict(jax.tree.map(
         lambda x: jnp.isfinite(x).all(range(1, x.ndim)),
         dict(obs=obs, carry=carry, tokens=tokens, feat=feat, act=act)))
-    carry = (enc_carry, dyn_carry, dec_carry, act)
+
+    prevact['action'] = prepend(prevact['action'][:, 1:], act['action'][:, None])
+    is_last['is_last'] = prepend(is_last['is_last'][:, 1:], obs['is_last'][:, None].astype(is_last['is_last'].dtype))
+    carry = (enc_carry, dyn_carry, dec_carry, prevact, is_last)
+
     if self.config.replay_context:
       out.update(elements.tree.flatdict(dict(
           enc=enc_entry, dyn=dyn_entry, dec=dec_entry)))
     return carry, act, out
 
   def train(self, carry, data):
-    carry, obs, prevact, stepid = self._apply_replay_context(carry, data)
+    carry, obs, prevact, is_last, stepid = self._apply_replay_context(carry, data)
     metrics, (carry, entries, outs, mets) = self.opt(
-        self.loss, carry, obs, prevact, training=True, has_aux=True)
+        self.loss, carry, obs, prevact, is_last, training=True, has_aux=True)
     metrics.update(mets)
     self.slowval.update()
     outs = {}
@@ -153,10 +170,11 @@ class Agent(embodied.jax.Agent):
       outs['replay'] = updates
     # if self.config.replay.fracs.priority > 0:
     #   outs['replay']['priority'] = losses['model']
-    carry = (*carry, {k: data[k][:, -1] for k in self.act_space})
+    carry = (*carry, {k: data[k][:, -1] for k in self.act_space},
+             {'is_last': data['is_last'][:, -1].astype(is_last['is_last'].dtype)})
     return carry, outs, metrics
 
-  def loss(self, carry, obs, prevact, training):
+  def loss(self, carry, obs, prevact, is_last, training):
     enc_carry, dyn_carry, dec_carry = carry
     reset = obs['is_first']
     B, T = reset.shape
@@ -167,7 +185,7 @@ class Agent(embodied.jax.Agent):
     enc_carry, enc_entries, tokens = self.enc(
         enc_carry, obs, reset, training)
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
-        dyn_carry, tokens, prevact, reset, training)
+        dyn_carry, tokens, prevact, is_last, reset, training)
     losses.update(los)
     metrics.update(mets)
     dec_carry, dec_entries, recons = self.dec(
@@ -199,7 +217,7 @@ class Agent(embodied.jax.Agent):
     # Imagination
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
-    starts = self.dyn.starts(dyn_entries, dyn_carry, K)
+    starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, K)
     policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
     first = jax.tree.map(
@@ -259,7 +277,7 @@ class Agent(embodied.jax.Agent):
     if not self.config.report:
       return carry, {}
 
-    carry, obs, prevact, _ = self._apply_replay_context(carry, data)
+    carry, obs, prevact, is_last, _ = self._apply_replay_context(carry, data)
     (enc_carry, dyn_carry, dec_carry) = carry
     B, T = obs['is_first'].shape
     RB = min(6, B)
@@ -267,7 +285,7 @@ class Agent(embodied.jax.Agent):
 
     # Train metrics
     _, (new_carry, entries, outs, mets) = self.loss(
-        carry, obs, prevact, training=False)
+        carry, obs, prevact, is_last, training=False)
     mets.update(mets)
 
     # Grad norms
@@ -287,10 +305,13 @@ class Agent(embodied.jax.Agent):
     dyn_carry = jax.tree.map(lambda x: x[:RB], dyn_carry)
     dec_carry = jax.tree.map(lambda x: x[:RB], dec_carry)
     dyn_carry, _, obsfeat = self.dyn.observe(
-        dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact),
+        dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact), firsthalf(is_last),
         firsthalf(obs['is_first']), training=False)
+    imagination_states = jax.tree.map(lambda x: x[:, None], dyn_carry)
+    imagination_actions = jax.tree.map(lambda x: x[:RB, :1], prevact)
+    imagination_carry = self.dyn.starts(imagination_states, dyn_carry, imagination_actions, nlast=1)
     _, imgfeat, _ = self.dyn.imagine(
-        dyn_carry, secondhalf(prevact), length=T - T // 2, training=False)
+        imagination_carry, secondhalf(prevact), length=T - T // 2, training=False)
     dec_carry, _, obsrecons = self.dec(
         dec_carry, obsfeat, firsthalf(obs['is_first']), training=False)
     dec_carry, _, imgrecons = self.dec(
@@ -317,18 +338,19 @@ class Agent(embodied.jax.Agent):
       grid = video.transpose((1, 2, 0, 3, 4)).reshape((T, H, B * W, C))
       metrics[f'openloop/{key}'] = grid
 
-    carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
+    carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space},
+             {'is_last': data['is_last'][:, -1].astype(is_last['is_last'].dtype)})
     return carry, metrics
 
   def _apply_replay_context(self, carry, data):
-    (enc_carry, dyn_carry, dec_carry, prevact) = carry
+    (enc_carry, dyn_carry, dec_carry, prevact, is_last) = carry
     carry = (enc_carry, dyn_carry, dec_carry)
     stepid = data['stepid']
     obs = {k: data[k] for k in self.obs_space}
-    prepend = lambda x, y: jnp.concatenate([x[:, None], y[:, :-1]], 1)
-    prevact = {k: prepend(prevact[k], data[k]) for k in self.act_space}
+    prevact = {k: prepend(prevact[k][:, None], data[k][:, :-1]) for k in self.act_space}
+    is_last = {'is_last': prepend(is_last['is_last'][:, None], data['is_last'][:, :-1])}
     if not self.config.replay_context:
-      return carry, obs, prevact, stepid
+      return carry, obs, prevact, is_last, stepid
 
     K = self.config.replay_context
     nested = elements.tree.nestdict(data)
@@ -341,14 +363,15 @@ class Agent(embodied.jax.Agent):
         self.dec.truncate(lhs(entries[2]), dec_carry))
     rep_obs = {k: rhs(data[k]) for k in self.obs_space}
     rep_prevact = {k: data[k][:, K - 1: -1] for k in self.act_space}
+    rep_is_last = {'is_last': data['is_last'][:, K - 1: -1]}
     rep_stepid = rhs(stepid)
 
     first_chunk = (data['consec'][:, 0] == 0)
-    carry, obs, prevact, stepid = jax.tree.map(
+    carry, obs, prevact, is_last, stepid = jax.tree.map(
         lambda normal, replay: nn.where(first_chunk, replay, normal),
-        (carry, rhs(obs), rhs(prevact), rhs(stepid)),
-        (rep_carry, rep_obs, rep_prevact, rep_stepid))
-    return carry, obs, prevact, stepid
+        (carry, rhs(obs), rhs(prevact), rhs(is_last), rhs(stepid)),
+        (rep_carry, rep_obs, rep_prevact, rep_is_last, rep_stepid))
+    return carry, obs, prevact, is_last, stepid
 
   def _make_opt(
       self,

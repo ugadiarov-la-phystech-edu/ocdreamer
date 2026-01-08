@@ -590,7 +590,7 @@ class MLP(nj.Module):
 class Transformer(nj.Module):
 
   units: int = 1024
-  layers: int = 12
+  layers: int = 6
   heads: int = 8
   ffup: int = 4
   act: str = 'silu'
@@ -602,17 +602,21 @@ class Transformer(nj.Module):
   winit: str | Callable = Initializer('trunc_normal')
   binit: str | Callable = Initializer('zeros')
   outscale: float = 1.0
+  concatenate_over_layers: bool = True
+  normalize_out: bool = False
+  dropout: float = 0.0
 
   def __call__(self, x, mask=None, ts=None, training=True):
     kw = {k: getattr(self, k) for k in ('bias', 'winit', 'binit')}
-    ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale')}
+    ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale', 'dropout')}
     D = x.shape[-1]
     assert D == self.units, (D, self.units)
+    out = []
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
         skip = x
         x = self.sub('norm1', Norm, self.norm)(x)
-        x  = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
+        x = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
         x += skip
         skip = x
         x = self.sub('norm2', Norm, self.norm)(x)
@@ -627,7 +631,15 @@ class Transformer(nj.Module):
           ff2 = self.sub('ff2', Linear, D, **kw, outscale=self.outscale)
           x = ff2(act(self.act)(ff1(x)))
         x += skip
-    x = self.sub('outnorm', Norm, self.norm)(x)
+        out.append(x)
+
+    if self.concatenate_over_layers:
+      x = jnp.stack(out, axis=2)
+      x = x.reshape((x.shape[0], x.shape[1], -1))
+
+    if self.normalize_out:
+      x = self.sub('outnorm', Norm, self.norm)(x)
+
     return x
 
 
