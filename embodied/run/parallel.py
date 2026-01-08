@@ -94,8 +94,8 @@ def parallel_actor(agent, barrier, args):
     with elements.timer.section('get_states'):
       carry = [carries[a] for a in envid]
       carry = elements.tree.map(lambda *xs: list(xs), *carry)
-    logs = {k: v for k, v in obs.items() if k.startswith('log/')}
-    obs = {k: v for k, v in obs.items() if not k.startswith('log/')}
+    logs = {k: v for k, v in obs.items() if k.startswith('log')}
+    obs = {k: v for k, v in obs.items() if not k.startswith('log')}
     carry, acts, outs = agent.policy(carry, obs)
     assert all(k not in acts for k in outs), (
         list(outs.keys()), list(acts.keys()))
@@ -109,8 +109,8 @@ def parallel_actor(agent, barrier, args):
 
   @elements.timer.section('donefn')
   def postfn(trans):
-    logs = {k: v for k, v in trans.items() if k.startswith('log/')}
-    trans = {k: v for k, v in trans.items() if not k.startswith('log/')}
+    logs = {k: v for k, v in trans.items() if k.startswith('log')}
+    trans = {k: v for k, v in trans.items() if not k.startswith('log')}
     replay.add_batch(trans)
     logger.tran({**trans, **logs})
     if should_log():
@@ -373,6 +373,8 @@ def parallel_logger(make_logger, args):
           episode.add(key + '/avg', value, agg='avg')
           episode.add(key + '/max', value, agg='max')
           episode.add(key + '/sum', value, agg='sum')
+        elif key.startswith('log_'): #keys start with log_ from homegrid
+          episode.add(key, value, agg='stack')
       if tran['is_last']:
         result = episode.result()
         logger.add({

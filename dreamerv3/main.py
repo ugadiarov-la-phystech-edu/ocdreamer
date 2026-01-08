@@ -4,13 +4,13 @@ import pathlib
 import sys
 from functools import partial as bind
 
-from embodied.core.logger import CometOutput
+
 
 folder = pathlib.Path(__file__).parent
 sys.path.insert(0, str(folder.parent))
 sys.path.insert(1, str(folder.parent.parent))
 __package__ = folder.name
-
+from embodied.core.logger import CometOutput
 import elements
 import embodied
 import numpy as np
@@ -129,7 +129,7 @@ def main(argv=None):
 def make_agent(config):
   from .agent import Agent
   env = make_env(config, 0)
-  notlog = lambda k: not k.startswith('log/')
+  notlog = lambda k: not k.startswith('log')
   obs_space = {k: v for k, v in env.obs_space.items() if notlog(k)}
   act_space = {k: v for k, v in env.act_space.items() if k != 'reset'}
   env.close()
@@ -234,6 +234,7 @@ def make_env(config, index, **overrides):
       'langroom': 'embodied.envs.langroom:LangRoom',
       'procgen': 'embodied.envs.procgen:ProcGen',
       'bsuite': 'embodied.envs.bsuite:BSuite',
+      'homegrid': 'embodied.envs.homegrid:HomeGrid',
       'memmaze': lambda task, **kw: from_gym.FromGym(
           f'MemoryMaze-{task}-v0', **kw),
   }[suite]
@@ -252,6 +253,9 @@ def make_env(config, index, **overrides):
 
 
 def wrap_env(env, config):
+  if hasattr(env, "wrappers"):
+    for w in env.wrappers:
+      env = w(env)
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.NormalizeAction(env, name)

@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import ninjax as nj
 import numpy as np
+import re
 
 f32 = jnp.float32
 sg = jax.lax.stop_gradient
@@ -205,11 +206,12 @@ class Encoder(nj.Module):
   outer: bool = False
   strided: bool = False
 
-  def __init__(self, obs_space, **kw):
+  def __init__(self, obs_space, cnn_keys=r'.*', mlp_keys=r'.*', **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    excluded = ('is_first', 'is_last', 'is_terminal', 'reward')
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and k not in excluded and re.match(mlp_keys, k) and not k.startswith('log')]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and k not in excluded and re.match(cnn_keys, k) and not k.startswith('log')]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
 
@@ -281,11 +283,12 @@ class Decoder(nj.Module):
   outer: bool = False
   strided: bool = False
 
-  def __init__(self, obs_space, **kw):
+  def __init__(self, obs_space,  cnn_keys=r'.*', mlp_keys=r'.*', **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    excluded = ('is_first', 'is_last', 'is_terminal', 'reward')
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and k not in excluded and re.match(mlp_keys, k) and not k.startswith('log')]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and k not in excluded and re.match(cnn_keys, k) and not k.startswith('log')]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.imgdep = sum(obs_space[k].shape[-1] for k in self.imgkeys)
     self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]

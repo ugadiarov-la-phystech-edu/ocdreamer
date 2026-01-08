@@ -49,7 +49,7 @@ class TestAgent:
     carry = np.asarray(carry)
 
     assert carry.shape == (B,)
-    assert not any(k.startswith('log/') for k in obs.keys())
+    assert not any(k.startswith('log') for k in obs.keys())
 
     target = (carry + 1) * (1 - obs['is_first'])
     assert (obs['count'] == target).all()
@@ -69,7 +69,7 @@ class TestAgent:
     B, T = data['count'].shape
     carry, = carry
     assert carry.shape == (B,)
-    assert not any(k.startswith('log/') for k in data.keys())
+    assert not any(k.startswith('log') for k in data.keys())
     self._stats['replay_steps'] += B * T
     for t in range(T):
       current = data['count'][:, t]

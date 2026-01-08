@@ -43,7 +43,7 @@ class Env:
   def obs_space(self):
     # The observation space must contain the keys is_first, is_last, and
     # is_terminal. Commonly, it also contains the keys reward and image. By
-    # convention, keys starting with 'log/' are not consumed by the agent.
+    # convention, keys starting with 'log' are not consumed by the agent.
     raise NotImplementedError('Returns: dict of spaces')
 
   @property

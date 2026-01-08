@@ -35,6 +35,8 @@ defaults:
     minecraft: {size: [64, 64], break_speed: 100.0, logs: False, length: 36000}
     dmc: {size: [64, 64], repeat: 1, proprio: True, image: True, camera: -1}
     loconav: {size: [64, 64], repeat: 1, camera: -1}
+    homegrid: {size: [64, 64], max_steps: 100, num_trashobjs: 2, num_trashcans: 2, p_teleport: 0.05, p_unsafe: 0.0, vis: False}
+
 
   replay:
     size: 5e6
@@ -76,15 +78,17 @@ defaults:
     train_devices: [0]
     mock_devices: 0
     prealloc: True
+    mem_fraction: 0.8
     jit: True
     debug: False
     expect_devices: 0
     enable_policy: True
     coordinator_address: ''
     precompile: True
+    profiler: True
 
   agent:
-    loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3}
+    loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3, token: 1.0, lm: 0.0}
     opt: {lr: 4e-5, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.0, schedule: const, warmup: 1000, anneal: 0}
     ac_grads: False
     dyn:
@@ -92,10 +96,10 @@ defaults:
       rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, use_transformer: True}
     enc:
       typ: simple
-      simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
+      simple: {mlp_keys: '.*', cnn_keys: '.*', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
     dec:
       typ: simple
-      simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
+      simple: {mlp_keys: '.*', cnn_keys: '.*', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
     rewhead: {layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
     conhead: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
     policy: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
@@ -195,6 +199,25 @@ loconav:
   task: loconav_ant_maze_m
   env.loconav.repeat: 1
   run.train_ratio: 256
+
+homegrid:
+  task: homegrid_task
+  run.envs: 66
+  agent.enc.simple.mlp_keys: token$ 
+  agent.enc.simple.cnn_keys: image
+  agent.dec.simple.mlp_keys: token$ 
+  agent.dec.simple.cnn_keys: image
+  #decoder.vector_dist: onehot 
+  batch_size: 16
+  batch_length: 256 
+  run.train_ratio: 32
+  replay.size: 1e6
+  agent.dyn.rssm.deter: 4096
+  agent.dyn.rssm.classes: 32
+  agent.rewhead.layers: 5
+  agent.conhead.layers: 5
+  agent.policy.layers: 5
+  agent.value.layers: 5
 
 multicpu:
   batch_size: 12

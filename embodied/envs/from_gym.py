@@ -63,6 +63,9 @@ class FromGym(embodied.Env):
       action = self._unflatten(action)
     else:
       action = action[self._act_key]
+    if isinstance(action, np.ndarray):
+        action = int(action)  
+    assert type(action)==int
     obs, reward, self._done, self._info = self._env.step(action)
     return self._obs(
         obs, reward,
@@ -119,5 +122,7 @@ class FromGym(embodied.Env):
 
   def _convert(self, space):
     if hasattr(space, 'n'):
-      return elements.Space(np.int32, (), 0, space.n)
-    return elements.Space(space.dtype, space.shape, space.low, space.high)
+      return  elements.Space(np.int32, (), 0, space.n)
+    if isinstance(space, gym.spaces.Text):
+      return elements.Space(str, (), None, None)  
+    return  elements.Space(space.dtype, space.shape, space.low, space.high)

@@ -64,8 +64,8 @@ class Driver:
     else:
       obs = [env.step(act) for env, act in zip(self.envs, acts)]
     obs = {k: np.stack([x[k] for x in obs]) for k in obs[0].keys()}
-    logs = {k: v for k, v in obs.items() if k.startswith('log/')}
-    obs = {k: v for k, v in obs.items() if not k.startswith('log/')}
+    logs = {k: v for k, v in obs.items() if k.startswith('log')}
+    obs = {k: v for k, v in obs.items() if not k.startswith('log')}
     assert all(len(x) == self.length for x in obs.values()), obs
     self.carry, acts, outs = policy(self.carry, obs, **self.kwargs)
     assert all(k not in acts for k in outs), (

@@ -79,7 +79,10 @@ class Agent(embodied.jax.Agent):
 
     scales = self.config.loss_scales.copy()
     rec = scales.pop('rec')
-    scales.update({k: rec for k in dec_space})
+    if self.config.loss_scales["lm"] ==  0:
+      scales.pop('lm')
+    scales.update({k: rec for k in self.dec.veckeys if k not in scales})
+    scales.update({k: rec for k in self.dec.imgkeys if k not in scales})
     self.scales = scales
 
   @property
@@ -180,6 +183,14 @@ class Agent(embodied.jax.Agent):
       assert value.dtype == space.dtype, (key, space, value.dtype)
       target = f32(value) / 255 if isimage(space) else value
       losses[key] = recon.loss(sg(target))
+    if self.config.loss_scales["lm"] >  0:
+      print("Adding LM loss")
+      next_ac = prevact[:, :-1].reshape((-1, 1, *prevact.shape[2:]))
+      context = {'feat': repfeat[:, :-1].reshape((-1, *repfeat.shape[2:]))}
+      one_step = self.dec(self.dyn.imagine(next_ac, context, False))
+      truth = obs['token'][:, 1:].reshape((-1, 1, *obs['token'].shape[2:]))
+      nll = -(one_step["token"].log_prob(truth)).mean(-1)
+      losses['lm'] = (nll * scales["lm"]).mean()
 
     B, T = reset.shape
     shapes = {k: v.shape for k, v in losses.items()}

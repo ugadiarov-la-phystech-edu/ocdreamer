@@ -250,6 +250,7 @@ class CheckSpaces(Wrapper):
 
   def step(self, action):
     for key, value in action.items():
+      if "language" in key or key.startswith("log_"): continue
       self._check(value, self.env.act_space[key], key)
     obs = self.env.step(action)
     for key, value in obs.items():

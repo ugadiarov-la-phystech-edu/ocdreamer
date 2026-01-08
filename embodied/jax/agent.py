@@ -48,7 +48,7 @@ class Agent(embodied.Agent):
     return outer
 
   def __init__(self, model, obs_space, act_space, config, jaxcfg):
-    assert not any(k.startswith('log/') for k in obs_space)
+    assert not any(k.startswith('log') for k in obs_space)
     assert 'reset' not in act_space
 
     self.model = model
@@ -222,7 +222,7 @@ class Agent(embodied.Agent):
   def policy(self, carry, obs, mode='train'):
     if not self.jaxcfg.enable_policy:
       raise Exception('Policy not available when enable_policy=False')
-    assert not any(k.startswith('log/') for k in obs), obs.keys()
+    assert not any(k.startswith('log') for k in obs), obs.keys()
     assert sorted(obs.keys()) == sorted(self.obs_space.keys()), (
         sorted(obs.keys()), sorted(self.obs_space.keys()))
     for key, space in self.obs_space.items():

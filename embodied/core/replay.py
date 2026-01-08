@@ -75,7 +75,7 @@ class Replay:
 
   @elements.timer.section('replay_add')
   def add(self, step, worker=0):
-    step = {k: v for k, v in step.items() if not k.startswith('log/')}
+    step = {k: v for k, v in step.items() if not k.startswith('log')}
     with self.rwlock.reading:
       step = {k: np.asarray(v) for k, v in step.items()}
 

@@ -58,6 +58,8 @@ def train_eval(
         episode.add(key + '/avg', value, agg='avg')
         episode.add(key + '/max', value, agg='max')
         episode.add(key + '/sum', value, agg='sum')
+      elif key.startswith('log_'): #keys start with log_ from homegrid
+          episode.add(key, value, agg='stack')
     if tran['is_last']:
       result = episode.result()
       logger.add({
