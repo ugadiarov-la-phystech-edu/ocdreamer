@@ -17,7 +17,7 @@ from embodied.jax.nets import Transformer
 
 
 concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
-prepend = lambda x, y: jnp.concatenate([x, y], 1)
+prepend = lambda *x: jnp.concatenate(x, 1)
 
 
 class AbstractSSM(nj.Module):
@@ -68,7 +68,7 @@ class AbstractSSM(nj.Module):
     return carry, action
 
   def initial(self, bsize: int):
-    return self._initial(bsize)
+    return self._initial(bsize, context_size=1)
 
   def initial_with_context(self, bsize: int):
     return self._initial(bsize, context_size=self.max_context_length)
@@ -117,21 +117,21 @@ class AbstractSSM(nj.Module):
 
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 3, entries['deter'].shape
-    carry = jax.tree.map(lambda x: x[:, -1], entries)
+    carry = jax.tree.map(lambda x: x[:, -1:], entries)
     return carry
 
   def starts(self, entries, carry, actions, nlast):
     raise NotImplementedError
 
-  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
+  def observe(self, carry, tokens, action, reset, training, single=False):
     raise NotImplementedError
 
   def imagine(self, carry, policy, length, training, single=False):
     raise NotImplementedError
 
-  def loss(self, carry, tokens, acts, is_last, reset, training):
+  def loss(self, all_carry, tokens, acts, reset, training):
     metrics = {}
-    carry, entries, feat = self.observe(carry, tokens, acts, is_last, reset, training)
+    carry, entries, feat = self.observe(all_carry, tokens, acts, reset, training)
     prior_logit = self._logit('imglogit', feat['deter'], self.imglayers)
     post_logit = feat['logit']
     dyn = self._dist(sg(post_logit)).kl(self._dist(prior_logit))
@@ -199,14 +199,14 @@ class RSSM(AbstractSSM):
     return jax.tree.map(
         lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
 
-  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
+  def observe(self, all_carry, tokens, action, reset, training, single=False):
     assert self.max_context_length == 1, f'RSSM: assume that max_context_length == 1: {(self.max_context_length, 1)}'
+    action = concat([all_carry['action'], action], 1)
+    carry = {'stoch': all_carry['stoch'][:, 0], 'deter': all_carry['deter'][:, 0]}
     carry, tokens, action = nn.cast((carry, tokens, action))
     if single:
-      carry = jax.tree.map(lambda x: x[:, 0], carry)
-      action = jax.tree.map(lambda x: x[:, 0], action)
       carry, (entry, feat) = self._observe(
-          carry, tokens, action, reset, training)
+          carry, tokens, jax.tree.map(lambda x: x[:, 0], action), reset, training)
       return jax.tree.map(lambda x: x[:, None], carry), entry, feat
     else:
       unroll = jax.tree.leaves(tokens)[0].shape[1] if self.unroll else 1
@@ -214,11 +214,11 @@ class RSSM(AbstractSSM):
           lambda carry, inputs: self._observe(
               carry, *inputs, training),
           carry, (tokens, action, reset), unroll=unroll, axis=1)
-      return carry, entries, feat
+      return {'stoch': carry['stoch'][:, None], 'deter': carry['deter'][:, None]}, entries, feat
 
-  def _observe(self, carry, tokens, action, reset, training):
+  def _observe(self, dyn_carry, tokens, action, reset, training):
     deter, stoch, action = nn.mask(
-        (carry['deter'], carry['stoch'], action), ~reset)
+        (dyn_carry['deter'], dyn_carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
     deter = self._core(deter, stoch, action, None, training)
@@ -226,11 +226,11 @@ class RSSM(AbstractSSM):
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     post_logit = self._logit('obslogit', x, self.obslayers)
     post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
-    carry = dict(deter=deter, stoch=post_stoch)
+    dyn_carry = dict(deter=deter, stoch=post_stoch)
     feat = dict(deter=deter, stoch=post_stoch, logit=post_logit)
     entry = dict(deter=deter, stoch=post_stoch)
     assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, post_stoch, post_logit))
-    return carry, (entry, feat)
+    return dyn_carry, (entry, feat)
 
   def imagine(self, carry, policy, length, training, single=False):
     if single:
@@ -364,39 +364,41 @@ class TSSM(AbstractSSM):
 
     return imagination_carry
 
-  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
-    carry, tokens, action, is_last = nn.cast((carry, tokens, action, is_last['is_last']))
-    action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
-    post_logit = self._logit('obslogit', tokens, self.obslayers)
-    post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
-    mask_last_steps = lambda x: x * (1 - jnp.expand_dims(is_last, range(len(is_last.shape), len(x.shape))))
-    action = jax.tree.map(mask_last_steps, action)
-
+  def observe(self, all_carry, tokens, action, reset, training, single=False):
     if single:
       assert not training
-      # Currently this mode is used only in agent.policy()
-      # Assume that carry and action contain the context data for transformer inference
-      carry = jax.tree.map(mask_last_steps, carry)
-      deter = self._core(None, carry['stoch'], action, is_last, training)
-      carry['stoch'] = prepend(carry['stoch'][:, 1:], post_stoch[:, None])
-      carry['deter'] = deter
+      all_carry, tokens, reset = nn.cast((all_carry, tokens, reset))
+      # if the current step is the first of the episode then the previous step is the last step
+      is_last = prepend(all_carry['reset'], reset[:, None])[:, 1:]
+      mask_last_steps = lambda x: x * (1 - jnp.expand_dims(is_last, range(len(is_last.shape), len(x.shape))))
+      action_carry_masked = jax.tree.map(mask_last_steps, nn.DictConcat(self.act_space, 1)(all_carry['action']))
+      stoch_carry_masked = jax.tree.map(mask_last_steps, all_carry['stoch'])
+      deter = self._core(None, stoch_carry_masked, action_carry_masked, is_last, training)
+      post_logit = self._logit('obslogit', tokens, self.obslayers)
+      post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
+      dyn_carry = {'stoch': prepend(all_carry['stoch'][:, 1:], post_stoch[:, None]), 'deter': deter}
       entries = {'deter': deter[:, -1], 'stoch': post_stoch}
       feat = dict(entries)
       feat['logit'] = post_logit
-      return carry, entries, feat
+      return dyn_carry, entries, feat
 
     # This mode is used for training and reporting
-    # carry contains 'deter' and 'stoch' from the previous time step
-    prev_post_stoch = prepend(carry['stoch'][:, None], post_stoch[:, :-1])
-    prev_post_stoch = jax.tree.map(mask_last_steps, prev_post_stoch)
-    deter = self._core(None, prev_post_stoch, action, is_last, training)
-    carry['stoch'] = post_stoch[:, -1]
-    carry['deter'] = deter[:, -1]
-    entries = {'deter': deter, 'stoch': post_stoch}
+    all_carry, tokens, action, reset = nn.cast((all_carry, tokens, action, reset))
+    full_tokens = prepend(all_carry['tokens'], tokens)
+    full_post_logit = self._logit('obslogit', full_tokens, self.obslayers)
+    full_post_stoch = nn.cast(self._dist(full_post_logit).sample(seed=nj.seed()))
+    full_is_last = prepend(all_carry['reset'], reset)[:, 1:]
+    mask_last_steps = lambda x: x * (1 - jnp.expand_dims(full_is_last, range(len(full_is_last.shape), len(x.shape))))
+    full_post_stoch_masked = jax.tree.map(mask_last_steps, full_post_stoch[:, :-1])
+    full_action = concat([all_carry['action'], action], 1)
+    full_action_masked = jax.tree.map(mask_last_steps, nn.DictConcat(self.act_space, 1)(full_action))
+    deter = self._core(None, full_post_stoch_masked, full_action_masked, full_is_last, training)
+    dyn_carry = {'stoch': full_post_stoch[:, -1:], 'deter': deter[:, -1:]}
+    entries = {'deter': deter, 'stoch': full_post_stoch[:, 1:]}
     feat = dict(entries)
-    feat['logit'] = post_logit
+    feat['logit'] = full_post_logit[:, 1:]
 
-    return carry, entries, feat
+    return dyn_carry, entries, feat
 
   def imagine(self, carry, policy, length, training, single=False):
     if single:
