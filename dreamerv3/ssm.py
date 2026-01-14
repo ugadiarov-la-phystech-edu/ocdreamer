@@ -345,20 +345,23 @@ class TSSM(AbstractSSM):
     return result
 
   def starts(self, entries, carry, actions, nlast):
-    assert nlast > 0, (nlast, 0)
-    pad_length = self.max_context_length - 1
-    pad = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length), entries)
-    entries = concat([pad, jax.tree.map(lambda x: x[:, -nlast:], entries)], 1)
-    state_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), entries)
+    B, T = entries['stoch'].shape[:2]
+    mask_out = lambda x, mask, fill_value: jnp.where(jnp.expand_dims(mask, list(range(mask.ndim, x.ndim))), fill_value, x)
+    # Assume that 0 < nlast < max_context_length <= T
+
+    mask_states = (jnp.arange(self.max_context_length) < self.max_context_length - nlast)[None, :]
+    state_starts = jax.tree.map(
+        lambda x: mask_out(jnp.roll(x[:, :self.max_context_length], -nlast, axis=1), mask_states, fill_value=0),
+        entries)
 
     # do not use last step masking during imagination
-    is_last = jnp.zeros(actions['action'].shape[:2], dtype=i32)
-    pad_is_last = jnp.ones((is_last.shape[0], pad_length), dtype=is_last.dtype)
-    is_last = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), prepend(pad_is_last, is_last))
+    is_last = jnp.zeros((B, self.max_context_length), dtype=i32)
+    is_last = jax.tree.map(lambda x: mask_out(jnp.roll(x, -nlast, axis=1), mask_states, fill_value=1), is_last)
 
-    pad_action = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length + 1), actions)
-    actions = concat([pad_action, jax.tree.map(lambda x: x[:, x.shape[1] - nlast + 1:x.shape[1]], actions)], 1)
-    action_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), actions)
+    mask_actions = (jnp.arange(self.max_context_length) < self.max_context_length - nlast + 1)[None, :]
+    action_starts = jax.tree.map(
+        lambda x: mask_out(jnp.roll(x[:, :self.max_context_length], -nlast + 1, axis=1), mask_actions, fill_value=0),
+        actions)
 
     imagination_carry = (state_starts, action_starts['action'], is_last)
 

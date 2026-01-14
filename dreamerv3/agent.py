@@ -204,19 +204,20 @@ class Agent(embodied.jax.Agent):
     assert all(x == (B, T) for x in shapes.values()), ((B, T), shapes)
 
     # Imagination
-    K = min(self.config.imag_last or T, T)
+    K = self.config.imag_last
     H = self.config.imag_length
-    starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, K)
+    context_length = jax.random.randint(nj.seed(), shape=(), minval=1, maxval=K)
+    starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, context_length)
     policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
     first = jax.tree.map(
-        lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
+        lambda x: x[:, context_length - 1].reshape((B, 1, *x.shape[2:])), repfeat)
     imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
     lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
     lastact = jax.tree.map(lambda x: x[:, None], lastact)
     imgact = concat([imgprevact, lastact], 1)
-    assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
-    assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
+    assert all(x.shape[:2] == (B, H + 1) for x in jax.tree.leaves(imgfeat))
+    assert all(x.shape[:2] == (B, H + 1) for x in jax.tree.leaves(imgact))
     inp = self.feat2tensor(imgfeat)
     los, imgloss_out, mets = imag_loss(
         imgact,
@@ -230,11 +231,13 @@ class Agent(embodied.jax.Agent):
         contdisc=self.config.contdisc,
         horizon=self.config.horizon,
         **self.config.imag_loss)
-    losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items()})
+    losses.update({k: v.mean(1).reshape((B, 1)) for k, v in los.items()})
     metrics.update(mets)
 
     # Replay
+    assert not self.config.repval_loss, 'Cannot use repval loss as it relies on imagining from each state of the replay buffer'
     if self.config.repval_loss:
+      K = min(self.config.imag_last or T, T)
       feat = sg(repfeat, skip=self.config.repval_grad)
       last, term, rew = [obs[k] for k in ('is_last', 'is_terminal', 'reward')]
       boot = imgloss_out['ret'][:, 0].reshape(B, K)
