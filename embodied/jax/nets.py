@@ -414,7 +414,7 @@ class Attention(nj.Module):
   heads: int = 8
   kv_heads: int = 0
   dropout: float = 0.0
-  rope: bool = True
+  position_embedding: str = 'none' # 'none', 'sinusoidal', 'rope'
   qknorm: str = 'none'
   bias: bool = True
   winit: str | Callable = Initializer('trunc_normal')
@@ -442,7 +442,7 @@ class Attention(nj.Module):
       q = self.sub('normq', Norm, self.qknorm)(q)
       k = self.sub('normk', Norm, self.qknorm)(k)
 
-    if self.rope:
+    if self.position_embedding == 'rope':
       q = rope(q, ts)
       k = rope(k, ts)
 
@@ -596,7 +596,7 @@ class Transformer(nj.Module):
   act: str = 'silu'
   norm: str = 'rms'
   glu: bool = False
-  rope: bool = True
+  position_embedding: str = 'none' # 'none', 'sinusoidal', 'rope'
   qknorm: str = 'none'
   bias: bool = True
   winit: str | Callable = Initializer('trunc_normal')
@@ -606,12 +606,37 @@ class Transformer(nj.Module):
   normalize_out: bool = False
   dropout: float = 0.0
 
+  def __init__(self):
+    super().__init__()
+    self._inv_freq = None
+    supported_position_embeddings = {'none', 'sinusoidal', 'rope'}
+    assert self.position_embedding in supported_position_embeddings, f'{self.position_embedding} is not in {supported_position_embeddings}'
+
+  def _sinusoidal_position_embedding(self, ts, dim):
+    assert ts is not None
+    if self._inv_freq is None:
+      inv_freq = 1 / (10000 ** (jnp.arange(0.0, dim, 2.0) / dim))
+      inv_freq = inv_freq[None]
+      if not isinstance(inv_freq, jax.core.Tracer):
+        # it is an actual array
+        self._inv_freq = inv_freq
+    else:
+      inv_freq = self._inv_freq
+
+    x = einops.einsum(ts, inv_freq, 'i j, i k -> i j k')
+    position_embedding = jnp.concatenate([jnp.sin(x), jnp.cos(x)], axis=-1)
+
+    return position_embedding
+
   def __call__(self, x, mask=None, ts=None, training=True):
     kw = {k: getattr(self, k) for k in ('bias', 'winit', 'binit')}
-    ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale', 'dropout')}
+    ak = {k: getattr(self, k) for k in ('heads', 'position_embedding', 'qknorm', 'outscale', 'dropout')}
     D = x.shape[-1]
     assert D == self.units, (D, self.units)
     out = []
+    if self.position_embedding == 'sinusoidal':
+      x = x + dropout(self._sinusoidal_position_embedding(ts, x.shape[-1]).astype(x.dtype), self.dropout, training)
+
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
         skip = x

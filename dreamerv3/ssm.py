@@ -311,7 +311,7 @@ class TSSM(AbstractSSM):
   transformer_act: str = 'silu'
   transformer_norm: str = 'rms'
   transformer_glu: bool = False
-  transformer_rope: bool = True
+  transformer_position_embedding: str = 'none' # 'none', 'sinusoidal', 'rope'
   transformer_qknorm: str = 'none'
   transformer_bias: bool = True
   transformer_outscale: float = 1.0
@@ -443,7 +443,7 @@ class TSSM(AbstractSSM):
     transformer_init_kwargs = {
         'units': self.deter, 'layers': self.transformer_layers, 'heads': self.transformer_heads,
         'ffup': self.transformer_ffup, 'act': self.transformer_act, 'norm': self.transformer_norm,
-        'glu': self.transformer_glu, 'rope': self.transformer_rope, 'qknorm': self.transformer_qknorm,
+        'glu': self.transformer_glu, 'position_embedding': self.transformer_position_embedding, 'qknorm': self.transformer_qknorm,
         'bias': self.transformer_bias, 'outscale': self.transformer_outscale,
         'concatenate_over_layers': self.transformer_concatenate_over_layers,
         'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
