@@ -605,32 +605,23 @@ class Transformer(nj.Module):
   concatenate_over_layers: bool = True
   normalize_out: bool = False
   dropout: float = 0.0
+  aggregation: bool = False
 
   def __call__(self, x, mask=None, ts=None, training=True):
-    kw = {k: getattr(self, k) for k in ('bias', 'winit', 'binit')}
-    ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale', 'dropout')}
-    D = x.shape[-1]
+    init_kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'rope', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
+    B, T, D = x.shape
     assert D == self.units, (D, self.units)
     out = []
+    if self.aggregation:
+      # use a learnable token to aggregate information over input
+      aggregation_token_kw = {'winit': self.winit, 'outscale': self.outscale, 'shape': (1, x.shape[-1]), 'dtype': x.dtype,}
+      aggregation_token = self.sub('aggregation_token', Learnable, **aggregation_token_kw)()
+      aggregation_token = jnp.repeat(aggregation_token[None], B, axis=0)
+      x = jnp.concatenate([x, aggregation_token], axis=1)
+
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
-        skip = x
-        x = self.sub('norm1', Norm, self.norm)(x)
-        x = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
-        x += skip
-        skip = x
-        x = self.sub('norm2', Norm, self.norm)(x)
-        if self.glu:
-          U = max(D, int((D * self.ffup * 2 / 3) // 32 * 32))
-          ff1 = self.sub('ff1', Linear, U, **kw)
-          ff2 = self.sub('ff2', Linear, U, **kw)
-          ff3 = self.sub('ff3', Linear, D, **kw, outscale=self.outscale)
-          x = ff3(act(self.act)(ff1(x)) * ff2(x))
-        else:
-          ff1 = self.sub('ff1', Linear, D * self.ffup, **kw)
-          ff2 = self.sub('ff2', Linear, D, **kw, outscale=self.outscale)
-          x = ff2(act(self.act)(ff1(x)))
-        x += skip
+        x = self.sub('transformer_layer', TransformerLayer, **init_kw)(x, mask, ts, training)
         out.append(x)
 
     if self.concatenate_over_layers:
@@ -639,6 +630,9 @@ class Transformer(nj.Module):
 
     if self.normalize_out:
       x = self.sub('outnorm', Norm, self.norm)(x)
+
+    if self.aggregation:
+      return x[:, -1]
 
     return x
 
@@ -680,3 +674,152 @@ class GRU(nj.Module):
     carry = output = update * cand + (1 - update) * carry
     return carry, output
 
+
+class TransformerLayer(nj.Module):
+
+  units: int = 1024
+  heads: int = 8
+  ffup: int = 4
+  act: str = 'silu'
+  norm: str = 'rms'
+  glu: bool = False
+  rope: bool = True
+  qknorm: str = 'none'
+  bias: bool = True
+  winit: str | Callable = Initializer('trunc_normal')
+  binit: str | Callable = Initializer('zeros')
+  outscale: float = 1.0
+  dropout: float = 0.0
+
+  def __call__(self, x, mask=None, ts=None, training=True):
+    kw = {k: getattr(self, k) for k in ('bias', 'winit', 'binit')}
+    ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale', 'dropout')}
+    D = x.shape[-1]
+    assert D == self.units, (D, self.units)
+    skip = x
+    x = self.sub('norm1', Norm, self.norm)(x)
+    x = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
+    x += skip
+    skip = x
+    x = self.sub('norm2', Norm, self.norm)(x)
+    if self.glu:
+      U = max(D, int((D * self.ffup * 2 / 3) // 32 * 32))
+      ff1 = self.sub('ff1', Linear, U, **kw)
+      ff2 = self.sub('ff2', Linear, U, **kw)
+      ff3 = self.sub('ff3', Linear, D, **kw, outscale=self.outscale)
+      x = ff3(act(self.act)(ff1(x)) * ff2(x))
+    else:
+      ff1 = self.sub('ff1', Linear, D * self.ffup, **kw)
+      ff2 = self.sub('ff2', Linear, D, **kw, outscale=self.outscale)
+      x = ff2(act(self.act)(ff1(x)))
+
+    x += skip
+
+    return x
+
+
+class ObjectCentricDynamicsLayer(nj.Module):
+
+  units: int = 1024
+  heads: int = 8
+  ffup: int = 4
+  act: str = 'silu'
+  norm: str = 'rms'
+  glu: bool = False
+  qknorm: str = 'none'
+  bias: bool = True
+  winit: str | Callable = Initializer('trunc_normal')
+  binit: str | Callable = Initializer('zeros')
+  outscale: float = 1.0
+  dropout: float = 0.0
+
+  def __call__(self, x, mask=None, ts=None, training=True):
+    kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
+    kw['rope'] = False
+    B, T, num_slots, slot_dim = x.shape
+    x = x.reshape(B * T, num_slots, slot_dim)
+    x = self.sub('object_encoder_block', TransformerLayer, **kw)(x, mask=None, ts=None, training=training)
+    x = x.reshape(B, T, num_slots, slot_dim)
+
+    x = jnp.swapaxes(x, 1, 2).reshape(B * num_slots, T, slot_dim)
+    mask = jnp.repeat(mask, num_slots, axis=0)
+    x = self.sub('time_encoder_block', TransformerLayer, **kw)(x, mask, ts=None, training=training)
+    x = jnp.swapaxes(x.reshape(B, num_slots, T, slot_dim), 1, 2)
+
+    return x
+
+
+class ObjectCentricDynamics(nj.Module):
+
+  units: int = 1024
+  layers: int = 6
+  heads: int = 8
+  ffup: int = 4
+  act: str = 'silu'
+  norm: str = 'rms'
+  glu: bool = False
+  qknorm: str = 'none'
+  bias: bool = True
+  winit: str | Callable = Initializer('trunc_normal')
+  binit: str | Callable = Initializer('zeros')
+  outscale: float = 1.0
+  dropout: float = 0.0
+  residual: bool = False
+  normalize_out: bool = False
+  position_embedding: str = 'sinusoidal' # 'none', 'sinusoidal'
+
+  def __init__(self):
+    super().__init__()
+    self._inv_freq = None
+
+  def _sinusoidal_position_embedding(self, ts, num_slots, dim):
+    assert ts is not None
+    if self._inv_freq is None:
+      inv_freq = 1 / (10000 ** (jnp.arange(0.0, dim, 2.0) / dim))
+      inv_freq = inv_freq[None]
+      if not isinstance(inv_freq, jax.core.Tracer):
+        # inv_freq is an actual array
+        self._inv_freq = inv_freq
+    else:
+      inv_freq = self._inv_freq
+
+    x = einops.einsum(ts, inv_freq, 'i j, i k -> i j k')
+    position_embedding = jnp.concatenate([jnp.sin(x), jnp.cos(x)], axis=-1)
+    position_embedding = jnp.expand_dims(position_embedding, axis=-2).repeat(num_slots, axis=-2)
+
+    return position_embedding
+
+  def __call__(self, x, mask=None, ts=None, training=True):
+    num_slots = x.shape[-2]
+    input_x = x
+    if self.position_embedding == 'sinusoidal':
+      x = x + dropout(self._sinusoidal_position_embedding(ts, num_slots, x.shape[-1]).astype(x.dtype), self.dropout, training)
+
+    kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
+    for i in range(self.layers):
+      with nj.scope(f'layer{i}'):
+        x = self.sub('object_centric_dynamics_layer', ObjectCentricDynamicsLayer, **kw)(x, mask, ts, training)
+
+    if self.residual:
+      x = x + input_x
+
+    if self.normalize_out:
+      x = self.sub('outnorm', Norm, self.norm)(x)
+
+    return x
+
+
+class Learnable(nj.Module):
+
+  winit: str | Callable = Initializer('trunc_normal')
+  outscale: float = 1.0
+
+  def __init__(self, shape, dtype):
+    self.shape = shape
+    self.dtype = dtype
+
+  def __call__(self):
+    return self.value('learnable', self._scaled_winit, self.shape).astype(self.dtype)
+
+  def _scaled_winit(self, *args, **kwargs):
+    return init(self.winit)(*args, **kwargs) * self.outscale

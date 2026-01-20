@@ -45,7 +45,8 @@ class Agent(embodied.jax.Agent):
     self.dyn = {
         'rssm': ssm.RSSM,
         'tssm': ssm.TSSM,
-    }[config.dyn.typ](act_space, **config.dyn[config.dyn.typ], name='dyn')
+        'octssm': ssm.ObjectCentricTSSM,
+    }[config.dyn.typ](act_space, obs_space, **config.dyn[config.dyn.typ], name='dyn')
     self.dec = {
         'simple': ssm.Decoder,
     }[config.dec.typ](dec_space, **config.dec[config.dec.typ], name='dec')
@@ -56,27 +57,30 @@ class Agent(embodied.jax.Agent):
 
     scalar = elements.Space(np.float32, ())
     binary = elements.Space(bool, (), 0, 2)
-    self.rew = embodied.jax.MLPHead(scalar, **config.rewhead, name='rew')
-    self.con = embodied.jax.MLPHead(binary, **config.conhead, name='con')
+    self.rew = self._build_head(scalar, config.rewhead, name='rew')
+    self.con = self._build_head(binary, config.conhead, name='con')
 
     d1, d2 = config.policy_dist_disc, config.policy_dist_cont
     outs = {k: d1 if v.discrete else d2 for k, v in act_space.items()}
-    self.pol = embodied.jax.MLPHead(
-        act_space, outs, **config.policy, name='pol')
+    self.pol = self._build_head(act_space, config.policy, name='pol', output=outs)
 
-    self.val = embodied.jax.MLPHead(scalar, **config.value, name='val')
+    self.val = self._build_head(scalar, config.value, name='val')
     self.slowval = embodied.jax.SlowModel(
-        embodied.jax.MLPHead(scalar, **config.value, name='slowval'),
+        self._build_head(scalar, config.value, name='slowval'),
         source=self.val, **config.slowvalue)
 
     self.retnorm = embodied.jax.Normalize(**config.retnorm, name='retnorm')
     self.valnorm = embodied.jax.Normalize(**config.valnorm, name='valnorm')
     self.advnorm = embodied.jax.Normalize(**config.advnorm, name='advnorm')
 
-    self.modules = [
-        self.dyn, self.enc, self.dec, self.rew, self.con, self.pol, self.val]
+    opt_modules = [self.dyn, self.dec, self.rew, self.con, self.pol, self.val]
+    self.modules = opt_modules + [self.enc]
+    if config.dyn.typ != 'octssm':
+        # an encoder returns slots as is
+        opt_modules.append(self.enc)
+
     self.opt = embodied.jax.Optimizer(
-        self.modules, self._make_opt(**config.opt), summary_depth=1,
+        opt_modules, self._make_opt(**config.opt), summary_depth=1,
         name='opt')
 
     scales = self.config.loss_scales.copy()
@@ -86,12 +90,27 @@ class Agent(embodied.jax.Agent):
 
     # do not use losses which have coef=0 and are not reconstructed by a decoder
     scales = {name: coef for name, coef in scales.items() if coef > 0 or name in [*self.dec.veckeys, *self.dec.imgkeys]}
+    scales.update({k: rec for k in self.dec.slotkeys if k not in scales})
     scales.update({k: rec for k in self.dec.veckeys if k not in scales})
     scales.update({k: rec for k in self.dec.imgkeys if k not in scales})
     if not self.config.repval_loss:
       del scales['repval']
 
     self.scales = scales
+
+  def _build_head(self, space, head_config, name, output=None):
+    head_config = dict(head_config)
+    if output is not None:
+      head_config[head_config['typ']]['output'] = output
+
+    if head_config['typ'] == 'mlp':
+      return embodied.jax.MLPHead(space, **head_config['mlp'], name=name)
+    elif head_config['typ'] == 'transformer':
+      cfg = dict(head_config['transformer'])
+      cfg['units'] = self.dyn.deter + self.dyn.stoch * self.dyn.classes
+      return embodied.jax.AggregationTransformerHead(space, **cfg, name=name)
+    else:
+      raise NotImplementedError(f'Head type not implemented: {head_config["typ"]}')
 
   @property
   def policy_keys(self):
@@ -141,7 +160,7 @@ class Agent(embodied.jax.Agent):
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
-    policy = self.pol(self.feat2tensor(feat), bdims=1)
+    policy = self.pol(self.feat2tensor(feat), bdims=1, training=False)
     act = sample(policy)
     out = {}
     out['finite'] = elements.tree.flatdict(jax.tree.map(
@@ -194,11 +213,11 @@ class Agent(embodied.jax.Agent):
     dec_carry, dec_entries, recons = self.dec(
         dec_carry, repfeat, reset, training)
     inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)
-    losses['rew'] = self.rew(inp, 2).loss(obs['reward'])
+    losses['rew'] = self.rew(inp, 2, training=training).loss(obs['reward'])
     con = f32(~obs['is_terminal'])
     if self.config.contdisc:
       con *= 1 - 1 / self.config.horizon
-    losses['con'] = self.con(self.feat2tensor(repfeat), 2).loss(con)
+    losses['con'] = self.con(self.feat2tensor(repfeat), 2, training=training).loss(con)
     for key, recon in recons.items():
       space, value = self.obs_space[key], obs[key]
       assert value.dtype == space.dtype, (key, space, value.dtype)
@@ -221,8 +240,8 @@ class Agent(embodied.jax.Agent):
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
     starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, K)
-    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
-    _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
+    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1, training=training))
+    _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training=False)
     first = jax.tree.map(
         lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
     imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
@@ -234,11 +253,11 @@ class Agent(embodied.jax.Agent):
     inp = self.feat2tensor(imgfeat)
     los, imgloss_out, mets = imag_loss(
         imgact,
-        self.rew(inp, 2).pred(),
-        self.con(inp, 2).prob(1),
-        self.pol(inp, 2),
-        self.val(inp, 2),
-        self.slowval(inp, 2),
+        self.rew(inp, 2, training=False).pred(),
+        self.con(inp, 2, training=False).prob(1),
+        self.pol(inp, 2, training=training),
+        self.val(inp, 2, training=training),
+        self.slowval(inp, 2, training=False),
         self.retnorm, self.valnorm, self.advnorm,
         update=training,
         contdisc=self.config.contdisc,
@@ -257,8 +276,8 @@ class Agent(embodied.jax.Agent):
       inp = self.feat2tensor(feat)
       los, reploss_out, mets = repl_loss(
           last, term, rew, boot,
-          self.val(inp, 2),
-          self.slowval(inp, 2),
+          self.val(inp, 2, training=training),
+          self.slowval(inp, 2, training=False),
           self.valnorm,
           update=training,
           horizon=self.config.horizon,

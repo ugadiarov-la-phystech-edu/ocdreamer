@@ -220,6 +220,8 @@ def make_env(config, index, **overrides):
     from embodied.envs import from_gym
     import memory_maze  # noqa
   ctor = {
+      'customdummyslot': 'embodied.envs.dummy:CustomDummySlot',
+      'customdummy': 'embodied.envs.dummy:CustomDummy',
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
       'dm': 'embodied.envs.from_dmenv:FromDM',

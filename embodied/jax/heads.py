@@ -1,3 +1,4 @@
+import math
 from typing import Callable
 
 import elements
@@ -33,7 +34,7 @@ class MLPHead(nj.Module):
     else:
       self.head = Head(space, output, **hkw, name='head')
 
-  def __call__(self, x, bdims):
+  def __call__(self, x, bdims, training):
     bshape = jax.tree.leaves(x)[0].shape[:bdims]
     x = x.reshape((*bshape, -1))
     x = self.mlp(x)
@@ -60,6 +61,46 @@ class DictHead(nj.Module):
       space = self.spaces[key]
       outputs[key] = self.sub(key, Head, space, impl, **self.kw)(x)
     return outputs
+
+
+class AggregationTransformerHead(nj.Module):
+
+  units: int = 1024
+  layers: int = 5
+  heads: int = 8
+  ffup: int = 4
+  act: str = 'silu'
+  norm: str = 'rms'
+  glu: bool = False
+  qknorm: str = 'none'
+  bias: bool = True
+  winit: str | Callable = nets.Initializer('trunc_normal')
+  binit: str | Callable = nets.Initializer('zeros')
+  outscale: float = 1.0
+  normalize_out: bool = False
+  dropout: float = 0.0
+
+  def __init__(self, space, output, **hkw):
+    shared = dict(bias=self.bias, winit=self.winit, binit=self.binit)
+    init_kw = {k: getattr(self, k) for k in ('units', 'layers', 'heads', 'ffup', 'act', 'norm', 'glu', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
+    init_kw['concatenate_over_layers'] = False
+    init_kw['aggregation'] = True
+    init_kw['rope'] = False
+    hkw = dict(**shared, **hkw)
+
+    self.backbone = self.sub('aggregation_transformer', nets.Transformer, **init_kw)
+    if isinstance(space, dict):
+      self.head = DictHead(space, output, **hkw, name='head')
+    else:
+      self.head = Head(space, output, **hkw, name='head')
+
+  def __call__(self, x, bdims, training):
+    bshape = x.shape[:bdims]
+    x = x.reshape((math.prod(bshape), *x.shape[bdims:]))
+    x = self.backbone(x, mask=None, ts=None, training=training)
+    x = x.reshape((*bshape, -1))
+    x = self.head(x)
+    return x
 
 
 class Head(nj.Module):
