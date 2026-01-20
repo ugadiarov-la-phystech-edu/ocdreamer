@@ -83,6 +83,9 @@ class Agent(embodied.jax.Agent):
     rec = scales.pop('rec')
     if self.config.loss_scales["lm"] ==  0:
       scales.pop('lm')
+
+    # do not use losses which have coef=0 and are not reconstructed by a decoder
+    scales = {name: coef for name, coef in scales.items() if coef > 0 or name in [*self.dec.veckeys, *self.dec.imgkeys]}
     scales.update({k: rec for k in self.dec.veckeys if k not in scales})
     scales.update({k: rec for k in self.dec.imgkeys if k not in scales})
     if not self.config.repval_loss:

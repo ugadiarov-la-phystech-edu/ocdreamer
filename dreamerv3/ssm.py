@@ -1,4 +1,5 @@
 import math
+import re
 
 import einops
 import elements
@@ -466,12 +467,14 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
+  vec_keys: str = '.*'
+  img_keys: str = '.*'
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k)]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k)]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
 
@@ -542,12 +545,14 @@ class Decoder(nj.Module):
   bspace: int = 8
   outer: bool = False
   strided: bool = False
+  vec_keys: str = '.*'
+  img_keys: str = '.*'
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k)]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k)]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.imgdep = sum(obs_space[k].shape[-1] for k in self.imgkeys)
     self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]

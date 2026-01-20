@@ -97,10 +97,10 @@ defaults:
       tssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, free_nats: 1.0, max_context_length: 64, transformer_layers: 6, transformer_heads: 8, transformer_ffup: 4, transformer_act: silu, transformer_norm: layer, transformer_glu: False, transformer_rope: True, transformer_qknorm: none, transformer_bias: True, transformer_outscale: 1.0, transformer_concatenate_over_layers: True, transformer_normalize_out: False, transformer_dropout: 0.0}
     enc:
       typ: simple
-      simple: {mlp_keys: '.*', cnn_keys: '.*', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
+      simple: {vec_keys: '.*', img_keys: '.*', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
     dec:
       typ: simple
-      simple: {mlp_keys: '.*', cnn_keys: '.*', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
+      simple: {vec_keys: '.*', img_keys: '.*', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
     rewhead: {layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
     conhead: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
     policy: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
@@ -204,10 +204,10 @@ loconav:
 homegrid:
   task: homegrid_task
   run.envs: 66
-  agent.enc.simple.mlp_keys: token$ 
-  agent.enc.simple.cnn_keys: image
-  agent.dec.simple.mlp_keys: token$ 
-  agent.dec.simple.cnn_keys: image
+  agent.enc.simple.vec_keys: token$
+  agent.enc.simple.img_keys: image
+  agent.dec.simple.vec_keys: token$
+  agent.dec.simple.img_keys: image
   #decoder.vector_dist: onehot 
   batch_size: 16
   batch_length: 256 
