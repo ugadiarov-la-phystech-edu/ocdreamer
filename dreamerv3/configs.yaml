@@ -93,16 +93,29 @@ defaults:
       typ: rssm
       rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0}
       tssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, free_nats: 1.0, max_context_length: 64, transformer_layers: 6, transformer_heads: 8, transformer_ffup: 4, transformer_act: silu, transformer_norm: layer, transformer_glu: False, transformer_rope: True, transformer_qknorm: none, transformer_bias: True, transformer_outscale: 1.0, transformer_concatenate_over_layers: True, transformer_normalize_out: False, transformer_dropout: 0.0}
+      octssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, free_nats: 1.0, max_context_length: 64, transformer_layers: 6, transformer_heads: 8, transformer_ffup: 4, transformer_act: silu, transformer_norm: layer, transformer_glu: False, transformer_position_embedding: sinusoidal, transformer_qknorm: none, transformer_bias: True, transformer_outscale: 1.0, transformer_concatenate_over_layers: True, transformer_normalize_out: False, transformer_dropout: 0.0}
     enc:
       typ: simple
       simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
     dec:
       typ: simple
       simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
-    rewhead: {layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
-    conhead: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
-    policy: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
-    value: {layers: 3, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
+    rewhead:
+      typ: mlp
+      mlp: {layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
+      transformer: {layers: 2, heads: 8, ffup: 4, act: silu, norm: layer, glu: False, qknorm: none, bias: True, winit: trunc_normal_in, binit: zeros, outscale: 1.0, normalize_out: False, dropout: 0.1, output: symexp_twohot, bins: 255}
+    conhead:
+      typ: mlp
+      mlp: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
+      transformer: {layers: 2, heads: 8, ffup: 4, act: silu, norm: layer, glu: False, qknorm: none, bias: True, winit: trunc_normal_in, binit: zeros, outscale: 1.0, normalize_out: False, dropout: 0.1, output: binary, bins: 255}
+    policy:
+      typ: mlp
+      mlp: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
+      transformer: {layers: 3, heads: 8, ffup: 4, act: silu, norm: layer, glu: False, qknorm: none, bias: True, winit: trunc_normal_in, binit: zeros, outscale: 1.0, normalize_out: False, dropout: 0.1, bins: 255, maxstd: 1.0, minstd: 0.01, unimix: 0.01}
+    value:
+      typ: mlp
+      mlp: {layers: 3, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
+      transformer: {layers: 3, heads: 8, ffup: 4, act: silu, norm: layer, glu: False, qknorm: none, bias: True, winit: trunc_normal_in, binit: zeros, outscale: 1.0, normalize_out: False, dropout: 0.1, output: symexp_twohot, bins: 255, maxstd: 1.0, minstd: 0.01, unimix: 0.01}
     policy_dist_disc: categorical
     policy_dist_cont: bounded_normal
     imag_last: 0

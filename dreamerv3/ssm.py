@@ -13,8 +13,7 @@ f32 = jnp.float32
 i32 = jnp.int32
 sg = jax.lax.stop_gradient
 
-from embodied.jax.nets import Transformer
-
+from embodied.jax.nets import Transformer, ObjectCentricDynamics
 
 concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
 prepend = lambda x, y: jnp.concatenate([x, y], 1)
@@ -38,8 +37,9 @@ class AbstractSSM(nj.Module):
   absolute: bool = False
   free_nats: float = 1.0
 
-  def __init__(self, act_space, **kw):
+  def __init__(self, act_space, obs_space, **kw):
     self.act_space = act_space
+    self.obs_space = obs_space
     self.kw = kw
 
   def _deter_out_dim(self):
@@ -117,6 +117,9 @@ class AbstractSSM(nj.Module):
 
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 3, entries['deter'].shape
+    return self._truncate(entries, carry=carry)
+
+  def _truncate(self, entries, carry=None):
     carry = jax.tree.map(lambda x: x[:, -1], entries)
     return carry
 
@@ -186,8 +189,9 @@ class RSSM(AbstractSSM):
   # rssm fields
   blocks: int = 8
 
-  def __init__(self, act_space, **kw):
-    super().__init__(act_space, **kw)
+  def __init__(self, act_space, obs_space, **kw):
+    super().__init__(act_space, obs_space, **kw)
+    assert 'slot' not in self.obs_space, 'RSSM does not support slots'
     self.max_context_length = 1
     assert self.deter % self.blocks == 0
 
@@ -319,8 +323,10 @@ class TSSM(AbstractSSM):
   transformer_normalize_out: bool = False
   transformer_dropout: float = 0.0
 
-  def __init__(self, act_space, **kw):
-      super().__init__(act_space, **kw)
+  def __init__(self, act_space, obs_space, **kw):
+    super().__init__(act_space, obs_space, **kw)
+    if type(self) == TSSM:
+      assert 'slot' not in self.obs_space, 'TSSM does not support slots'
 
   def _deter_out_dim(self):
     if self.transformer_concatenate_over_layers:
@@ -454,6 +460,108 @@ class TSSM(AbstractSSM):
     return deter
 
 
+class ObjectCentricTSSM(TSSM):
+
+  # base fields
+  deter: int = 4096
+  hidden: int = 2048
+  stoch: int = 32
+  classes: int = 32
+  norm: str = 'rms'
+  act: str = 'gelu'
+  unroll: bool = False
+  unimix: float = 0.01
+  outscale: float = 1.0
+  imglayers: int = 2
+  obslayers: int = 1
+  dynlayers: int = 1
+  absolute: bool = False
+  free_nats: float = 1.0
+
+  # object-centric tssm fields
+  max_context_length: int = 64
+  transformer_layers: int = 6
+  transformer_heads: int = 8
+  transformer_ffup: int = 4
+  transformer_act: str = 'silu'
+  transformer_norm: str = 'rms'
+  transformer_glu: bool = False
+  transformer_qknorm: str = 'none'
+  transformer_bias: bool = True
+  transformer_outscale: float = 1.0
+  transformer_concatenate_over_layers: bool = True
+  transformer_normalize_out: bool = False
+  transformer_dropout: float = 0.0
+  transformer_position_embedding: str = 'sinusoidal' # 'sinusoidal', 'none'
+
+  def __init__(self, act_space, obs_space, **kw):
+    super().__init__(act_space, obs_space, **kw)
+    assert 'slot' in self.obs_space
+    self.num_slots = self.obs_space['slot'].shape[0]
+
+  @property
+  def entry_space(self):
+    deter = self._deter_out_dim()
+    return dict(
+        deter=elements.Space(np.float32, (self.num_slots, deter)),
+        stoch=elements.Space(np.float32, (self.num_slots, self.stoch, self.classes)))
+
+  def _deter_out_dim(self):
+    return self.deter
+
+  def _initial(self, bsize: int, context_size: int = None):
+    deter = self._deter_out_dim()
+    shape = [bsize,]
+    if context_size is not None:
+        shape.append(context_size)
+
+    carry = nn.cast(dict(
+        deter=jnp.zeros([*shape, self.num_slots, deter], f32),
+        stoch=jnp.zeros([*shape, self.num_slots, self.stoch, self.classes], f32)))
+
+    zeros = lambda x: jnp.zeros([*shape, *x.shape], x.dtype)
+    action = jax.tree.map(zeros, self.act_space)
+
+    return carry, action
+
+  def loss(self, carry, tokens, acts, is_last, reset, training):
+    carry, entries, losses, feat, metrics = super().loss(carry, tokens, acts, is_last, reset, training)
+    losses = {k: v.mean(-1) for k, v in losses.items()}
+
+    return carry, entries, losses, feat, metrics
+
+  def truncate(self, entries, carry=None):
+    assert entries['deter'].ndim == 4, entries['deter'].shape
+    return self._truncate(entries, carry)
+
+  def _core(self, deter, stoch, action, is_last, training):
+    assert stoch.shape[:2] == is_last.shape[:2], (stoch.shape, is_last.shape)
+    stoch = stoch.reshape((*stoch.shape[:-2], -1))
+    x = self.sub('dynin', nn.Linear, self.deter)(stoch)
+    action /= sg(jnp.maximum(1, jnp.abs(action)))
+    action_embedding = self.sub('actin', nn.Linear, self.deter)(action)
+
+    # process an action as a slot
+    x = jnp.concatenate([x, jnp.expand_dims(action_embedding, -2)], -2)
+    mask = self._causal_mask(is_last)
+    episode_step_idx = self._enumerate_steps(is_last)
+
+    init_kw = {
+        'units': self.deter, 'layers': self.transformer_layers, 'heads': self.transformer_heads,
+        'ffup': self.transformer_ffup, 'act': self.transformer_act, 'norm': self.transformer_norm,
+        'glu': self.transformer_glu, 'qknorm': self.transformer_qknorm,
+        'bias': self.transformer_bias, 'outscale': self.transformer_outscale,
+        'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
+        'position_embedding': self.transformer_position_embedding,
+    }
+    deter = self.sub('object_centric_dynamics', ObjectCentricDynamics, **init_kw)(x, mask=mask, ts=episode_step_idx,
+                                                                            training=training)
+    # cut off action-slot
+    deter = deter[..., :-1, :]
+
+    return deter
+
+
 class Encoder(nj.Module):
 
   units: int = 1024
@@ -470,10 +578,16 @@ class Encoder(nj.Module):
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    self.slotkeys = [k for k, s in obs_space.items() if k == 'slot']
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and k not in self.slotkeys]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and k not in self.slotkeys]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
+
+    if len(self.slotkeys) > 0:
+      assert len(self.slotkeys) == 1, f'{self.slotkeys}'
+      assert len(self.veckeys) == 0, f'{self.veckeys}: slot observation cannot be mixed with vectors'
+      assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
 
   @property
   def entry_space(self):
@@ -489,6 +603,11 @@ class Encoder(nj.Module):
     bdims = 1 if single else 2
     outs = []
     bshape = reset.shape
+
+    if self.slotkeys:
+      x = obs['slot']
+      x = x.reshape((-1, *x.shape[len(bshape):]))
+      outs.append(x)
 
     if self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
@@ -546,12 +665,18 @@ class Decoder(nj.Module):
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    self.slotkeys = [k for k, s in obs_space.items() if k == 'slot']
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and k not in self.slotkeys]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and k not in self.slotkeys]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.imgdep = sum(obs_space[k].shape[-1] for k in self.imgkeys)
     self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
     self.kw = kw
+
+    if len(self.slotkeys) > 0:
+      assert len(self.slotkeys) == 1, f'{self.slotkeys}'
+      assert len(self.veckeys) == 0, f'{self.veckeys}: slot observation cannot be mixed with vectors'
+      assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
 
   @property
   def entry_space(self):
@@ -568,9 +693,26 @@ class Decoder(nj.Module):
     K = self.kernel
     recons = {}
     bshape = reset.shape
+    if self.slotkeys:
+      num_slots = feat['deter'].shape[-2]
+      bshape = (*bshape, num_slots)
+    else:
+      assert feat['deter'].shape[-1] % self.bspace == 0
+
     inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
     inp = jnp.concatenate(inp, -1)
+
+    if self.slotkeys:
+      spaces = {k: self.obs_space[k].shape[-1:] for k in self.slotkeys}
+      outputs = {k: 'symlog_mse' if self.symlog else 'mse' for k, v in spaces.items()}
+      kw = dict(**self.kw, act=self.act, norm=self.norm)
+      x = self.sub('mlp', nn.MLP, self.layers, self.units, **kw)(inp)
+      x = x.reshape((*bshape, *x.shape[1:]))
+      kw = dict(**self.kw, outscale=self.outscale)
+      outs = self.sub('vec', embodied.jax.DictHead, spaces, outputs, **kw)(x)
+      outs = {k: embodied.jax.outs.Agg(v, 1, jnp.sum) for k, v in outs.items()}
+      recons.update(outs)
 
     if self.veckeys:
       spaces = {k: self.obs_space[k] for k in self.veckeys}

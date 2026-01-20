@@ -3,6 +3,7 @@ from .agent import Agent
 from .heads import DictHead
 from .heads import Head
 from .heads import MLPHead
+from .heads import AggregationTransformerHead
 
 from .utils import LayerScan
 from .utils import Normalize
