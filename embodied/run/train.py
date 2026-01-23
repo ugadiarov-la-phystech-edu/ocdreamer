@@ -5,6 +5,8 @@ import elements
 import embodied
 import numpy as np
 
+from embodied.core.wrappers import create_batch_env
+
 
 def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
 
@@ -55,7 +57,8 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
       epstats.add(result)
 
   fns = [bind(make_env, i) for i in range(args.envs)]
-  driver = embodied.Driver(fns, parallel=not args.debug)
+  batch_env = create_batch_env(fns, parallel=(not args.debug), config=args)
+  driver = embodied.Driver(batch_env)
   driver.on_step(lambda tran, _: step.increment())
   driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(replay.add)

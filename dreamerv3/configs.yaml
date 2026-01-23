@@ -35,6 +35,7 @@ defaults:
     minecraft: {size: [64, 64], break_speed: 100.0, logs: False, length: 36000}
     dmc: {size: [64, 64], repeat: 1, proprio: True, image: True, camera: -1}
     loconav: {size: [64, 64], repeat: 1, camera: -1}
+    customdummy: {size: [ 64, 64 ]}
 
   replay:
     size: 5e6
@@ -68,6 +69,8 @@ defaults:
     remote_envs: False
     usage: {psutil: True, nvsmi: True, gputil: False, malloc: False, gc: False}
     debug: True
+    use_slots: False
+    slot_extractor: {config_path: '', checkpoint_path: '', device: 'cuda:0'}
 
   jax:
     platform: cuda
@@ -133,6 +136,7 @@ defaults:
     repval_grad: True
     report: True
     report_gradnorms: False
+    exclude_obs_keys: ['']
 
 size1m: &size1m
   .*\.rssm: {deter: 512, hidden: 64, classes: 4}

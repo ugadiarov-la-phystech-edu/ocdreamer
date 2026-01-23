@@ -1,32 +1,15 @@
-import time
-
-import cloudpickle
 import elements
 import numpy as np
-import portal
 
 
 class Driver:
 
-  def __init__(self, make_env_fns, parallel=True, **kwargs):
-    assert len(make_env_fns) >= 1
-    self.parallel = parallel
+  def __init__(self, batch_env, **kwargs):
+    assert batch_env.n_envs >= 1
     self.kwargs = kwargs
-    self.length = len(make_env_fns)
-    if parallel:
-      import multiprocessing as mp
-      context = mp.get_context()
-      self.pipes, pipes = zip(*[context.Pipe() for _ in range(self.length)])
-      self.stop = context.Event()
-      fns = [cloudpickle.dumps(fn) for fn in make_env_fns]
-      self.procs = [
-          portal.Process(self._env_server, self.stop, i, pipe, fn, start=True)
-          for i, (fn, pipe) in enumerate(zip(fns, pipes))]
-      self.pipes[0].send(('act_space',))
-      self.act_space = self._receive(self.pipes[0])
-    else:
-      self.envs = [fn() for fn in make_env_fns]
-      self.act_space = self.envs[0].act_space
+    self.length = batch_env.n_envs
+    self.batch_env = batch_env
+    self.act_space = self.batch_env.act_space
     self.callbacks = []
     self.acts = None
     self.carry = None
@@ -40,10 +23,7 @@ class Driver:
     self.carry = init_policy and init_policy(self.length)
 
   def close(self):
-    if self.parallel:
-      [proc.kill() for proc in self.procs]
-    else:
-      [env.close() for env in self.envs]
+    self.batch_env.close()
 
   def on_step(self, callback):
     self.callbacks.append(callback)
@@ -58,12 +38,7 @@ class Driver:
     assert all(len(x) == self.length for x in acts.values())
     assert all(isinstance(v, np.ndarray) for v in acts.values())
     acts = [{k: v[i] for k, v in acts.items()} for i in range(self.length)]
-    if self.parallel:
-      [pipe.send(('step', act)) for pipe, act in zip(self.pipes, acts)]
-      obs = [self._receive(pipe) for pipe in self.pipes]
-    else:
-      obs = [env.step(act) for env, act in zip(self.envs, acts)]
-    obs = {k: np.stack([x[k] for x in obs]) for k in obs[0].keys()}
+    obs = self.batch_env.step(acts)
     logs = {k: v for k, v in obs.items() if k.startswith('log/')}
     obs = {k: v for k, v in obs.items() if not k.startswith('log/')}
     assert all(len(x) == self.length for x in obs.values()), obs
@@ -86,53 +61,3 @@ class Driver:
     while mask.ndim < value.ndim:
       mask = mask[..., None]
     return value * mask.astype(value.dtype)
-
-  def _receive(self, pipe):
-    try:
-      msg, arg = pipe.recv()
-      if msg == 'error':
-        raise RuntimeError(arg)
-      assert msg == 'result'
-      return arg
-    except Exception:
-      print('Terminating workers due to an exception.')
-      [proc.kill() for proc in self.procs]
-      raise
-
-  @staticmethod
-  def _env_server(stop, envid, pipe, ctor):
-    try:
-      ctor = cloudpickle.loads(ctor)
-      env = ctor()
-      while not stop.is_set():
-        if not pipe.poll(0.1):
-          time.sleep(0.1)
-          continue
-        try:
-          msg, *args = pipe.recv()
-        except EOFError:
-          return
-        if msg == 'step':
-          assert len(args) == 1
-          act = args[0]
-          obs = env.step(act)
-          pipe.send(('result', obs))
-        elif msg == 'obs_space':
-          assert len(args) == 0
-          pipe.send(('result', env.obs_space))
-        elif msg == 'act_space':
-          assert len(args) == 0
-          pipe.send(('result', env.act_space))
-        else:
-          raise ValueError(f'Invalid message {msg}')
-    except ConnectionResetError:
-      print('Connection to driver lost')
-    except Exception as e:
-      pipe.send(('error', e))
-      raise
-    finally:
-      try:
-        env.close()
-      except Exception:
-        pass
-      pipe.close()

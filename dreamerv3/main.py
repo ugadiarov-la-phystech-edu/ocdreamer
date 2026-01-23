@@ -4,6 +4,8 @@ import pathlib
 import sys
 from functools import partial as bind
 
+from omegaconf import OmegaConf
+
 from embodied.core.logger import CometOutput
 
 folder = pathlib.Path(__file__).parent
@@ -262,6 +264,9 @@ def wrap_env(env, config):
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)
+  if config.run.use_slots:
+    slot_extractor_config = OmegaConf.load(config.run.slot_extractor.config_path).model.initializer
+    env = embodied.wrappers.AddSlotSpace(env, slot_extractor_config.n_slots, slot_extractor_config.dim)
   return env
 
 

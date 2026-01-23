@@ -3,12 +3,15 @@ from functools import partial as bind
 import embodied
 import numpy as np
 
+from embodied.core.wrappers import BatchEnv
+
 
 class TestDriver:
 
   def test_episode_length(self):
     agent = self._make_agent()
-    driver = embodied.Driver([self._make_env])
+    batch_env = BatchEnv([self._make_env], parallel=False)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     seq = []
     driver.on_step(lambda tran, _: seq.append(tran))
@@ -17,7 +20,8 @@ class TestDriver:
 
   def test_first_step(self):
     agent = self._make_agent()
-    driver = embodied.Driver([self._make_env])
+    batch_env = BatchEnv([self._make_env], parallel=False)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     seq = []
     driver.on_step(lambda tran, _: seq.append(tran))
@@ -30,7 +34,8 @@ class TestDriver:
 
   def test_last_step(self):
     agent = self._make_agent()
-    driver = embodied.Driver([self._make_env])
+    batch_env = BatchEnv([self._make_env], parallel=False)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     seq = []
     driver.on_step(lambda tran, _: seq.append(tran))
@@ -43,7 +48,8 @@ class TestDriver:
 
   def test_env_reset(self):
     agent = self._make_agent()
-    driver = embodied.Driver([bind(self._make_env, length=5)])
+    batch_env = BatchEnv([bind(self._make_env, length=5)], parallel=False)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     seq = []
     driver.on_step(lambda tran, _: seq.append(tran))
@@ -59,7 +65,8 @@ class TestDriver:
 
   def test_agent_inputs(self):
     agent = self._make_agent()
-    driver = embodied.Driver([self._make_env])
+    batch_env = BatchEnv([self._make_env], parallel=False)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     inputs = []
     states = []
@@ -100,7 +107,8 @@ class TestDriver:
     env = self._make_env(length=4)
     env = UnexpectedReset(env, when=3)
     agent = self._make_agent()
-    driver = embodied.Driver([lambda: env])
+    batch_env = BatchEnv([lambda: env], parallel=False)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     steps = []
     driver.on_step(lambda tran, _: steps.append(tran))

@@ -1,6 +1,9 @@
 import functools
 import time
 
+import cloudpickle
+import portal
+
 import elements
 import numpy as np
 
@@ -416,3 +419,138 @@ class RestartOnException(Wrapper):
       self.env = self._ctor()
       action['reset'] = np.ones_like(action['reset'])
       return self.env.step(action)
+
+
+class BatchEnv:
+  def __init__(self, make_env_fns, parallel):
+    self.parallel = parallel
+    self.n_envs = len(make_env_fns)
+    if self.parallel:
+      import multiprocessing as mp
+      context = mp.get_context()
+      self.pipes, pipes = zip(*[context.Pipe() for _ in range(len(make_env_fns))])
+      self.stop = context.Event()
+      fns = [cloudpickle.dumps(fn) for fn in make_env_fns]
+      self.procs = [
+          portal.Process(self._env_server, self.stop, i, pipe, fn, start=True)
+          for i, (fn, pipe) in enumerate(zip(fns, pipes))]
+      self.pipes[0].send(('act_space',))
+      self.act_space = self._receive(self.pipes[0])
+    else:
+      self.envs = [fn() for fn in make_env_fns]
+      self.act_space = self.envs[0].act_space
+
+  def _receive(self, pipe):
+    try:
+      msg, arg = pipe.recv()
+      if msg == 'error':
+        raise RuntimeError(arg)
+      assert msg == 'result'
+      return arg
+    except Exception:
+      print('Terminating workers due to an exception.')
+      [proc.kill() for proc in self.procs]
+      raise
+
+  @staticmethod
+  def _env_server(stop, envid, pipe, ctor):
+    try:
+      ctor = cloudpickle.loads(ctor)
+      env = ctor()
+      while not stop.is_set():
+        if not pipe.poll(0.1):
+          time.sleep(0.1)
+          continue
+        try:
+          msg, *args = pipe.recv()
+        except EOFError:
+          return
+        if msg == 'step':
+          assert len(args) == 1
+          act = args[0]
+          obs = env.step(act)
+          pipe.send(('result', obs))
+        elif msg == 'obs_space':
+          assert len(args) == 0
+          pipe.send(('result', env.obs_space))
+        elif msg == 'act_space':
+          assert len(args) == 0
+          pipe.send(('result', env.act_space))
+        else:
+          raise ValueError(f'Invalid message {msg}')
+    except ConnectionResetError:
+      print('Connection to driver lost')
+    except Exception as e:
+      pipe.send(('error', e))
+      raise
+    finally:
+      try:
+        env.close()
+      except Exception:
+        pass
+      pipe.close()
+
+  def step(self, acts):
+    if self.parallel:
+      [pipe.send(('step', act)) for pipe, act in zip(self.pipes, acts)]
+      obs = [self._receive(pipe) for pipe in self.pipes]
+    else:
+      obs = [env.step(act) for env, act in zip(self.envs, acts)]
+
+    obs = {k: np.stack([x[k] for x in obs]) for k in obs[0].keys()}
+    return obs
+
+  def close(self):
+    if self.parallel:
+      [proc.kill() for proc in self.procs]
+    else:
+      [env.close() for env in self.envs]
+
+
+class BatchSlotExtractorEnv(BatchEnv):
+  def __init__(self, slot_extractor, make_env_fns, parallel=False):
+    super().__init__(make_env_fns, parallel)
+    self._slot_extractor = slot_extractor
+    self._previous_slots = None
+
+  def step(self, acts):
+    obs = super().step(acts)
+    images = obs['image']
+    is_first = obs['is_first']
+    slots = np.zeros((self.n_envs, self._slot_extractor.n_slots, self._slot_extractor.dim), dtype=np.float32)
+    if is_first.any():
+      slots[is_first] = self._slot_extractor.get_slots(images[is_first], previous_slots=None)
+
+    if not is_first.all():
+      slots[~is_first] = self._slot_extractor.get_slots(images[~is_first], previous_slots=self._previous_slots[~is_first])
+
+    obs['slot'] = slots
+    self._previous_slots = slots
+
+    return obs
+
+
+def create_batch_env(make_env_fns, parallel, config):
+  if config.use_slots:
+    from embodied.torch.ocr.tools import DinoV2saur
+    slot_extractor = DinoV2saur(
+        config.slot_extractor.config_path, config.slot_extractor.checkpoint_path, config.slot_extractor.device
+    )
+    return BatchSlotExtractorEnv(slot_extractor, make_env_fns, parallel=parallel)
+  else:
+    return BatchEnv(make_env_fns, parallel)
+
+
+class AddSlotSpace(Wrapper):
+
+  def __init__(self, env, n_slots, slot_dim):
+    super().__init__(env)
+    self._n_slots = n_slots
+    self._slot_dim = slot_dim
+
+  @functools.cached_property
+  def obs_space(self):
+    return {
+        **self.env.obs_space,
+        'slot': elements.Space(np.float32, shape=(self._n_slots, self._slot_dim)),
+    }

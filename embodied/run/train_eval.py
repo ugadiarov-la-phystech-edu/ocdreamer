@@ -5,6 +5,8 @@ import elements
 import embodied
 import numpy as np
 
+from embodied.core.wrappers import create_batch_env
+
 
 def train_eval(
     make_agent,
@@ -70,14 +72,16 @@ def train_eval(
       epstats.add(result)
 
   fns = [bind(make_env_train, i) for i in range(args.envs)]
-  driver_train = embodied.Driver(fns, parallel=(not args.debug))
+  batch_env = create_batch_env(fns, parallel=(not args.debug), config=args)
+  driver_train = embodied.Driver(batch_env)
   driver_train.on_step(lambda tran, _: step.increment())
   driver_train.on_step(lambda tran, _: policy_fps.step())
   driver_train.on_step(replay_train.add)
   driver_train.on_step(bind(logfn, mode='train'))
 
   fns = [bind(make_env_eval, i) for i in range(args.eval_envs)]
-  driver_eval = embodied.Driver(fns, parallel=(not args.debug))
+  batch_env = create_batch_env(fns, parallel=(not args.debug), config=args)
+  driver_eval = embodied.Driver(batch_env)
   driver_eval.on_step(replay_eval.add)
   driver_eval.on_step(bind(logfn, mode='eval'))
   driver_eval.on_step(lambda tran, _: policy_fps.step())
