@@ -15,7 +15,7 @@ class Replay:
 
   def __init__(
       self, length, capacity=None, directory=None, chunksize=1024,
-      online=False, selector=None, save_wait=False, name='unnamed', seed=0):
+      online=False, selector=None, save_wait=False, name='unnamed', seed=0, exclude_keys=()):
 
     self.length = length
     self.capacity = capacity
@@ -51,6 +51,7 @@ class Replay:
     self.save_wait = save_wait
 
     self.metrics = {'samples': 0, 'inserts': 0, 'updates': 0}
+    self.exclude_keys = set(exclude_keys)
 
   def __len__(self):
     return len(self.items)
@@ -75,7 +76,7 @@ class Replay:
 
   @elements.timer.section('replay_add')
   def add(self, step, worker=0):
-    step = {k: v for k, v in step.items() if not k.startswith('log/')}
+    step = {k: v for k, v in step.items() if not k.startswith('log/') and k not in self.exclude_keys}
     with self.rwlock.reading:
       step = {k: np.asarray(v) for k, v in step.items()}
 

@@ -136,6 +136,7 @@ defaults:
     repval_grad: True
     report: True
     report_gradnorms: False
+    exclude_obs_keys_from_training: ['']
     exclude_obs_keys: ['']
 
 size1m: &size1m

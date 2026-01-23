@@ -554,3 +554,14 @@ class AddSlotSpace(Wrapper):
         **self.env.obs_space,
         'slot': elements.Space(np.float32, shape=(self._n_slots, self._slot_dim)),
     }
+
+
+class ExcludeSpaces(Wrapper):
+
+  def __init__(self, env, exclude_space_keys):
+    super().__init__(env)
+    self._exclude_space_keys = set(exclude_space_keys)
+
+  @functools.cached_property
+  def obs_space(self):
+    return {k: v for k, v in self.env.obs_space.items() if k not in self._exclude_space_keys}

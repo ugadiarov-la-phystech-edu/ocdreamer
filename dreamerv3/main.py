@@ -199,7 +199,7 @@ def make_replay(config, folder, mode='train'):
     directory /= f'{config.replica:05}'
   kwargs = dict(
       length=length, capacity=int(capacity), online=config.replay.online,
-      chunksize=config.replay.chunksize, directory=directory)
+      chunksize=config.replay.chunksize, directory=directory, exclude_keys=config.agent.exclude_obs_keys,)
 
   if config.replay.fracs.uniform < 1 and mode == 'train':
     assert config.jax.compute_dtype in ('bfloat16', 'float32'), (
@@ -267,6 +267,8 @@ def wrap_env(env, config):
   if config.run.use_slots:
     slot_extractor_config = OmegaConf.load(config.run.slot_extractor.config_path).model.initializer
     env = embodied.wrappers.AddSlotSpace(env, slot_extractor_config.n_slots, slot_extractor_config.dim)
+
+  env = embodied.wrappers.ExcludeSpaces(env, exclude_space_keys=config.agent.exclude_obs_keys)
   return env
 
 
