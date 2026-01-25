@@ -7,8 +7,8 @@ import torch
 import torchvision
 from torch import nn
 
-from embodied.torch.ocr.dinov2_saur.dinov2 import build_model_for_eval
-from embodied.torch.ocr.dinov2_saur.dinov2.configs import get_cfg_from_args
+from embodied.torch.ocr.dinov2saur.dinov2 import build_model_for_eval
+from embodied.torch.ocr.dinov2saur.dinov2.configs import get_cfg_from_args
 
 
 class FrameEncoder(nn.Module):

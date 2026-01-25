@@ -508,37 +508,34 @@ class BatchEnv:
 
 
 class BatchSlotExtractorEnv(BatchEnv):
-  def __init__(self, slot_extractor, make_env_fns, parallel=False):
+  def __init__(self, slot_extractor, make_env_fns, use_previous_slots, initialize_twice, parallel=False):
     super().__init__(make_env_fns, parallel)
     self._slot_extractor = slot_extractor
-    self._previous_slots = None
+    self._use_previous_slots = use_previous_slots
+    self._initialize_twice = initialize_twice
+    self._previous_slots = np.zeros((self.n_envs, self._slot_extractor.n_slots, self._slot_extractor.dim), dtype=np.float32)
 
   def step(self, acts):
     obs = super().step(acts)
     images = obs['image']
-    is_first = obs['is_first']
-    slots = np.zeros((self.n_envs, self._slot_extractor.n_slots, self._slot_extractor.dim), dtype=np.float32)
-    if is_first.any():
-      slots[is_first] = self._slot_extractor.get_slots(images[is_first], previous_slots=None)
+    if self._use_previous_slots:
+      is_first = obs['is_first']
+      slots = np.zeros_like(self._previous_slots)
+      if is_first.any():
+        slots[is_first] = self._slot_extractor.get_slots(images[is_first], previous_slots=None)
+        if self._initialize_twice:
+          self._previous_slots[is_first] = slots[is_first]
+          is_first = np.full_like(is_first, False)
 
-    if not is_first.all():
-      slots[~is_first] = self._slot_extractor.get_slots(images[~is_first], previous_slots=self._previous_slots[~is_first])
+      if not is_first.all():
+        slots[~is_first] = self._slot_extractor.get_slots(images[~is_first], previous_slots=self._previous_slots[~is_first])
 
-    obs['slot'] = slots
-    self._previous_slots = slots
+      obs['slot'] = slots
+      self._previous_slots = slots
+    else:
+      obs['slot'] = self._slot_extractor.get_slots(images, previous_slots=None)
 
     return obs
-
-
-def create_batch_env(make_env_fns, parallel, config):
-  if config.use_slots:
-    from embodied.torch.ocr.tools import DinoV2saur
-    slot_extractor = DinoV2saur(
-        config.slot_extractor.config_path, config.slot_extractor.checkpoint_path, config.slot_extractor.device
-    )
-    return BatchSlotExtractorEnv(slot_extractor, make_env_fns, parallel=parallel)
-  else:
-    return BatchEnv(make_env_fns, parallel)
 
 
 class AddSlotSpace(Wrapper):

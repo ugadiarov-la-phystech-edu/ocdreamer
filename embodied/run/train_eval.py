@@ -5,15 +5,13 @@ import elements
 import embodied
 import numpy as np
 
-from embodied.core.wrappers import create_batch_env
-
 
 def train_eval(
     make_agent,
     make_replay_train,
     make_replay_eval,
-    make_env_train,
-    make_env_eval,
+    make_batch_env_train,
+    make_batch_env_eval,
     make_stream,
     make_logger,
     args):
@@ -71,16 +69,14 @@ def train_eval(
         result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
       epstats.add(result)
 
-  fns = [bind(make_env_train, i) for i in range(args.envs)]
-  batch_env = create_batch_env(fns, parallel=(not args.debug), config=args)
+  batch_env = make_batch_env_train(args)
   driver_train = embodied.Driver(batch_env)
   driver_train.on_step(lambda tran, _: step.increment())
   driver_train.on_step(lambda tran, _: policy_fps.step())
   driver_train.on_step(replay_train.add)
   driver_train.on_step(bind(logfn, mode='train'))
 
-  fns = [bind(make_env_eval, i) for i in range(args.eval_envs)]
-  batch_env = create_batch_env(fns, parallel=(not args.debug), config=args)
+  batch_env = make_batch_env_eval(args)
   driver_eval = embodied.Driver(batch_env)
   driver_eval.on_step(replay_eval.add)
   driver_eval.on_step(bind(logfn, mode='eval'))

@@ -7,6 +7,7 @@ from functools import partial as bind
 from omegaconf import OmegaConf
 
 from embodied.core.logger import CometOutput
+from embodied.core.wrappers import BatchSlotExtractorEnv, BatchEnv
 
 folder = pathlib.Path(__file__).parent
 sys.path.insert(0, str(folder.parent))
@@ -73,7 +74,7 @@ def main(argv=None):
     embodied.run.train(
         bind(make_agent, config),
         bind(make_replay, config, 'replay'),
-        bind(make_env, config),
+        bind(make_batch_env, config),
         bind(make_stream, config),
         bind(make_logger, config),
         args)
@@ -83,8 +84,8 @@ def main(argv=None):
         bind(make_agent, config),
         bind(make_replay, config, 'replay'),
         bind(make_replay, config, 'eval_replay', 'eval'),
-        bind(make_env, config),
-        bind(make_env, config),
+        bind(make_batch_env, config),
+        bind(make_batch_env, config),
         bind(make_stream, config),
         bind(make_logger, config),
         args)
@@ -92,7 +93,7 @@ def main(argv=None):
   elif config.script == 'eval_only':
     embodied.run.eval_only(
         bind(make_agent, config),
-        bind(make_env, config),
+        bind(make_batch_env, config),
         bind(make_logger, config),
         args)
 
@@ -101,8 +102,8 @@ def main(argv=None):
         bind(make_agent, config),
         bind(make_replay, config, 'replay'),
         bind(make_replay, config, 'replay_eval', 'eval'),
-        bind(make_env, config),
-        bind(make_env, config),
+        bind(make_batch_env, config),
+        bind(make_batch_env, config),
         bind(make_stream, config),
         bind(make_logger, config),
         args)
@@ -110,12 +111,12 @@ def main(argv=None):
   elif config.script == 'parallel_env':
     is_eval = config.replica >= args.envs
     embodied.run.parallel.parallel_env(
-        bind(make_env, config), config.replica, args, is_eval)
+        bind(make_batch_env, config), config.replica, args, is_eval)
 
   elif config.script == 'parallel_envs':
     is_eval = config.replica >= args.envs
     embodied.run.parallel.parallel_envs(
-        bind(make_env, config), bind(make_env, config), args)
+        bind(make_batch_env, config), bind(make_batch_env, config), args)
 
   elif config.script == 'parallel_replay':
     embodied.run.parallel.parallel_replay(
@@ -216,8 +217,12 @@ def make_replay(config, folder, mode='train'):
   return embodied.replay.Replay(**kwargs)
 
 
+def parse_suite_task(suite_task):
+    return suite_task.split('_', 1)
+
+
 def make_env(config, index, **overrides):
-  suite, task = config.task.split('_', 1)
+  suite, task = parse_suite_task(config.task)
   if suite == 'memmaze':
     from embodied.envs import from_gym
     import memory_maze  # noqa
@@ -264,12 +269,54 @@ def wrap_env(env, config):
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)
-  if config.run.use_slots:
-    slot_extractor_config = OmegaConf.load(config.run.slot_extractor.config_path).model.initializer
-    env = embodied.wrappers.AddSlotSpace(env, slot_extractor_config.n_slots, slot_extractor_config.dim)
+  config_batch_env = config.agent.batch_env
+  if config_batch_env.use_slot_extractor:
+    config_batch_slot_extractor_env = config_batch_env.batch_slot_extractor_env
+    slot_extractor_config = OmegaConf.load(config_batch_slot_extractor_env.slot_extractor.config_path)
+    if config_batch_slot_extractor_env.slot_extractor.typ == 'dinov2saur':
+      initializer_config = slot_extractor_config.model.initializer
+      n_slots = initializer_config.n_slots
+      dim = initializer_config.dim
+    elif config_batch_slot_extractor_env.slot_extractor.typ == 'slate':
+      slotattr_config = slot_extractor_config.slotattr
+      n_slots = slotattr_config.num_slots
+      dim = slotattr_config.slot_size
+    else:
+      raise ValueError(f'Unknown slot extractor type: {config_batch_slot_extractor_env.slot_extractor.typ}')
+
+    env = embodied.wrappers.AddSlotSpace(env, n_slots, dim)
 
   env = embodied.wrappers.ExcludeSpaces(env, exclude_space_keys=config.agent.exclude_obs_keys)
   return env
+
+
+def make_batch_env(config, args):
+  env_fn = [bind(make_env, config, i) for i in range(args.envs)]
+  parallel = not args.debug
+  if config.agent.batch_env.use_slot_extractor:
+    config_slot_extractor = config.agent.batch_env.batch_slot_extractor_env.slot_extractor
+    typ = config_slot_extractor.typ
+    if typ == 'dinov2saur':
+      from embodied.torch.ocr.dinov2saur.modules.dinov2saur import DinoV2saur
+      cls = DinoV2saur
+    elif typ == 'slate':
+      from embodied.torch.ocr.slate.slate_extractor import SLATEExtractor
+      cls = SLATEExtractor
+    else:
+      raise ValueError(f'Unknown slot extractor type: {typ}')
+
+    suite = parse_suite_task(config.task)[0]
+    image_size = config.env[suite].size
+    slot_extractor = cls(
+        config_slot_extractor.config_path, config_slot_extractor.checkpoint_path, image_size,
+        config_slot_extractor.device
+    )
+    return BatchSlotExtractorEnv(slot_extractor, env_fn,
+                                 use_previous_slots=config.agent.batch_env.batch_slot_extractor_env.use_previous_slots,
+                                 initialize_twice=config.agent.batch_env.batch_slot_extractor_env.initialize_twice,
+                                 parallel=parallel)
+  else:
+    return BatchEnv(env_fn, parallel)
 
 
 def make_stream(config, replay, mode):

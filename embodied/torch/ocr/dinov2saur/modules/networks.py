@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from embodied.torch.ocr.dinov2_saur.modules import utils
+from embodied.torch.ocr.dinov2saur.modules import utils
 
 # Default weight init for MLP, CNNEncoder, CNNDecoder
 DEFAULT_WEIGHT_INIT = "default"

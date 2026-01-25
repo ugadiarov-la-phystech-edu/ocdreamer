@@ -5,10 +5,8 @@ import elements
 import embodied
 import numpy as np
 
-from embodied.core.wrappers import create_batch_env
 
-
-def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
+def train(make_agent, make_replay, make_batch_env, make_stream, make_logger, args):
 
   agent = make_agent()
   replay = make_replay()
@@ -56,8 +54,7 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
         result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
       epstats.add(result)
 
-  fns = [bind(make_env, i) for i in range(args.envs)]
-  batch_env = create_batch_env(fns, parallel=(not args.debug), config=args)
+  batch_env = make_batch_env(args)
   driver = embodied.Driver(batch_env)
   driver.on_step(lambda tran, _: step.increment())
   driver.on_step(lambda tran, _: policy_fps.step())

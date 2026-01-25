@@ -1,34 +1,15 @@
-import math
+from abc import abstractmethod, ABC
 
 # Types
 from typing import TypeVar, Optional
 
 import torch
-import torchvision.transforms
 import numpy as np
 
-from omegaconf import OmegaConf
 from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import adjusted_rand_score
-
-from embodied.torch.ocr.dinov2_saur.modules.encoders import TimmExtractor, FrameEncoder
-from embodied.torch.ocr.dinov2_saur.modules.groupers import SlotAttention
-from embodied.torch.ocr.dinov2_saur.modules.initializers import RandomInit, FixedLearnedInit
-from embodied.torch.ocr.dinov2_saur.modules.networks import build
-from embodied.torch.ocr.dinov2_saur.modules.video import LatentProcessor
 
 Tensor = TypeVar("torch.tensor")
 NN = TypeVar("torch.nn")
-
-# [B, D, H, W] -> [B, N, D]
-img_to_slot = lambda x: x.permute(0, 2, 3, 1).reshape(x.shape[0], -1, x.shape[1])
-
-
-# [B, N, D] -> [B, D, H, W]
-def slot_to_img(slot):
-    B, N, D = slot.shape
-    size = int(math.sqrt(N))
-    return slot.reshape(B, size, size, D).permute(0, 3, 1, 2)
 
 
 def preprocessing_obs(obs, device, type="image"):
@@ -52,34 +33,6 @@ def to_device(batch, device):
     return batch
 
 
-# get_item from pytorch tensor
-def get_item(x):
-    if len(x.shape) == 0:
-        return x.item()
-    else:
-        return x.detach().cpu().numpy()
-
-
-# reshape image for visualization
-for_viz = lambda x: np.array(
-    x.clamp(0, 1).permute(0, 2, 3, 1).detach().cpu().numpy() * 255.0, dtype=np.uint8
-)
-
-
-# Taken from https://github.com/singhgautam/slate/blob/master/slate.py
-def visualize(images):
-    B, _, H, W = images[0].shape  # first image is observation
-    viz_imgs = []
-    for _img in images:
-        if len(_img.shape) == 4:
-            viz_imgs.append(_img)
-        else:
-            viz_imgs += [object_image.expand_as(viz_imgs[0]) for object_image in torch.unbind(_img, dim=1)]
-    viz_imgs = torch.cat(viz_imgs, dim=-1)
-    # return torch.cat(torch.unbind(viz_imgs,dim=0), dim=-2).unsqueeze(0)
-    return viz_imgs
-
-
 # hungarian matching
 def hungarian_matching(target, input, return_diff_mat=False):
     tN, tD = target.shape
@@ -96,21 +49,6 @@ def hungarian_matching(target, input, return_diff_mat=False):
         return torch.LongTensor(col_ind).to(target.device)
 
 
-# calculate ARI
-def calculate_ari(true_masks, pred_masks):
-    true_masks = true_masks.flatten(2)
-    pred_masks = pred_masks.flatten(2)
-
-    true_mask_ids = get_item(torch.argmax(true_masks, dim=1))
-    pred_mask_ids = get_item(torch.argmax(pred_masks, dim=1))
-
-    aris = []
-    for b in range(true_mask_ids.shape[0]):
-        aris.append(adjusted_rand_score(true_mask_ids[b], pred_mask_ids[b]))
-
-    return aris
-
-
 # change img numpy array to torch Tensor
 def obs_to_tensor(obs, device):
     if len(obs.shape) == 4:
@@ -119,73 +57,17 @@ def obs_to_tensor(obs, device):
         return torch.Tensor(obs).to(device)
 
 
-class DinoV2saur(torch.nn.Module):
-    def __init__(self, config_path, checkpoint_path, device):
-        super().__init__()
-        self._device = device
-        self._config_path = config_path
-        self._checkpoint_path = checkpoint_path
-        self._config = OmegaConf.load(self._config_path).model
-        self._normalization = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+class SlotExtractor(ABC):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
-        initializer_kwargs = dict(self._config.initializer)
-        initializer_name = initializer_kwargs.pop("name")
-        self.initializer = self._instantiate(initializer_name, [RandomInit, FixedLearnedInit], initializer_kwargs)
-
-        backbone_kwargs = dict(self._config.encoder.backbone)
-        backbone_name = backbone_kwargs.pop("name")
-        backbone = self._instantiate(backbone_name, [TimmExtractor], backbone_kwargs)
-
-        output_transform_config = self._config.encoder.output_transform
-        output_transform = build(output_transform_config, 'two_layer_mlp')
-
-        encoder_config = self._config.encoder
-        self.encoder = FrameEncoder(backbone=backbone, pos_embed=None, output_transform=output_transform,
-                                     spatial_flatten=False, main_features_key=encoder_config.get("main_features_key", "vit_block12"))
-
-        grouper_config = self._config.grouper
-        grouper = SlotAttention(inp_dim=grouper_config.inp_dim, slot_dim=grouper_config.slot_dim,
-                                     n_iters=grouper_config.n_iters, use_mlp=grouper_config.use_mlp, )
-        self.processor = LatentProcessor(grouper, predictor=None)
-
-        state_dict = torch.load(self._checkpoint_path, weights_only=False)['state_dict']
-        missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
-        assert len(missing_keys) == 0, f'{missing_keys}'
-        assert all(key.startswith('decoder') for key in unexpected_keys)
-
-        self.to(self._device)
-        self.requires_grad_(False)
-        self.eval()
-
-    @property
+    @abstractmethod
     def n_slots(self):
-        return self._config.initializer.n_slots
+        pass
 
-    @property
+    @abstractmethod
     def dim(self):
-        return self._config.initializer.dim
-
-    @staticmethod
-    def _instantiate(class_name, classes, kwargs):
-        for cls in classes:
-            if cls.__name__ == class_name:
-                return cls(**kwargs)
-
-        raise ValueError(f'Unknown class name: {class_name}')
-
-    def forward(self, image, previous_slots=None):
-        encoder_input = self._normalization(image)
-        batch_size = image.size()[0]
-
-        encoder_output = self.encoder(encoder_input)
-        features = encoder_output["features"]
-
-        slots_initial = previous_slots
-        if slots_initial is None:
-            slots_initial = self.initializer(batch_size=batch_size)
-
-        processor_output = self.processor(slots_initial, features)
-        return processor_output["state"]
+        pass
 
     def get_slots(self, images, previous_slots, to_numpy=True):
         one_image = len(images.shape) == 3
@@ -384,14 +266,3 @@ class ARIMetric:
 
     def compute(self):
         return self.values / self.total
-
-
-if __name__ == "__main__":
-    config_path = '/samsung/projects/ocdreamer/embodied/torch/ocr/dinov2_saur/config/homegrid_base14_dinov2_n-slot-7.yaml'
-    checkpoint_path = '/samsung/projects/videosaur/checkpoint/homegrid/n-slot-7/checkpoints/step=497500.ckpt'
-    dinosaur = DinoV2saur(config_path, checkpoint_path, 'cuda')
-    # state_dict = torch.load(checkpoint_path, weights_only=False)['state_dict']
-    # missing_keys, unexpected_keys = dinosaur.load_state_dict(state_dict, strict=False)
-    # assert len(missing_keys) == 0, f'{missing_keys}'
-    # assert all(key.startswith('decoder') for key in unexpected_keys)
-    # print()

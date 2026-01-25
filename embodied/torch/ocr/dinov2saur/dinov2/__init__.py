@@ -1,6 +1,6 @@
 import torch
 
-from embodied.torch.ocr.dinov2_saur.dinov2.models import build_model_from_cfg
+from embodied.torch.ocr.dinov2saur.dinov2.models import build_model_from_cfg
 
 
 def load_pretrained_weights(model, pretrained_weights, checkpoint_key):

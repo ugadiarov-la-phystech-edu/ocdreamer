@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from embodied.torch.ocr.dinov2_saur.modules import networks
+from embodied.torch.ocr.dinov2saur.modules import networks
 
 
 class SlotAttention(nn.Module):
