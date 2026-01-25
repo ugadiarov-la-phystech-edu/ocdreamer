@@ -22,3 +22,7 @@ tqdm
 comet_ml
 moviepy==1.0.3
 ml_dtypes==0.5.4
+
+# for Shapes2D
+gym==0.26.0
+scikit-image
