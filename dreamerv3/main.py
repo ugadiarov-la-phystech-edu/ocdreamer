@@ -226,6 +226,10 @@ def make_env(config, index, **overrides):
   if suite == 'memmaze':
     from embodied.envs import from_gym
     import memory_maze  # noqa
+  elif suite == 'shapes2d':
+    from embodied.envs import from_gym
+    import embodied.envs.shapes2d
+
   ctor = {
       'customdummyslot': 'embodied.envs.dummy:CustomDummySlot',
       'customdummy': 'embodied.envs.dummy:CustomDummy',
@@ -245,6 +249,7 @@ def make_env(config, index, **overrides):
       'bsuite': 'embodied.envs.bsuite:BSuite',
       'memmaze': lambda task, **kw: from_gym.FromGym(
           f'MemoryMaze-{task}-v0', **kw),
+      'shapes2d': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False)
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
@@ -257,10 +262,10 @@ def make_env(config, index, **overrides):
   if kwargs.pop('use_logdir', False):
     kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
   env = ctor(task, **kwargs)
-  return wrap_env(env, config)
+  return wrap_env(env, config, **kwargs)
 
 
-def wrap_env(env, config):
+def wrap_env(env, config, **kwargs):
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.NormalizeAction(env, name)
@@ -269,6 +274,11 @@ def wrap_env(env, config):
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)
+  if 'resize' in kwargs:
+    env = embodied.wrappers.ResizeImage(env, **kwargs['resize'])
+  if 'timelimit' in kwargs:
+    env = embodied.wrappers.TimeLimit(env, **kwargs['timelimit'])
+
   config_batch_env = config.agent.batch_env
   if config_batch_env.use_slot_extractor:
     config_batch_slot_extractor_env = config_batch_env.batch_slot_extractor_env
@@ -306,7 +316,12 @@ def make_batch_env(config, args):
       raise ValueError(f'Unknown slot extractor type: {typ}')
 
     suite = parse_suite_task(config.task)[0]
-    image_size = config.env[suite].size
+    config_env = config.env[suite]
+    if 'resize' in config_env:
+      image_size = config_env.resize.size
+    else:
+      image_size = config_env.size
+
     slot_extractor = cls(
         config_slot_extractor.config_path, config_slot_extractor.checkpoint_path, image_size,
         config_slot_extractor.device

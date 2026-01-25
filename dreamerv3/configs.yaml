@@ -36,6 +36,9 @@ defaults:
     dmc: {size: [64, 64], repeat: 1, proprio: True, image: True, camera: -1}
     loconav: {size: [64, 64], repeat: 1, camera: -1}
     customdummy: {size: [ 64, 64 ]}
+    shapes2d:
+      resize: {size: [64, 64]}
+      timelimit: {duration: 100}
 
   replay:
     size: 5e6
