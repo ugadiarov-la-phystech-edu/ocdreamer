@@ -489,7 +489,6 @@ class ObjectCentricTSSM(TSSM):
   transformer_qknorm: str = 'none'
   transformer_bias: bool = True
   transformer_outscale: float = 1.0
-  transformer_concatenate_over_layers: bool = True
   transformer_normalize_out: bool = False
   transformer_dropout: float = 0.0
   transformer_position_embedding: str = 'sinusoidal' # 'sinusoidal', 'none'
