@@ -133,9 +133,9 @@ class AbstractSSM(nj.Module):
   def imagine(self, carry, policy, length, training, single=False):
     raise NotImplementedError
 
-  def loss(self, carry, tokens, acts, is_last, reset, training):
+  def loss(self, carry, tokens, acts, is_last, reset, training, text_embeds=None):
     metrics = {}
-    carry, entries, feat = self.observe(carry, tokens, acts, is_last, reset, training)
+    carry, entries, feat = self.observe(carry, tokens, acts, is_last, reset, training, text_embeds=text_embeds)
     prior_logit = self._logit('imglogit', feat['deter'], self.imglayers)
     post_logit = feat['logit']
     dyn = self._dist(sg(post_logit)).kl(self._dist(prior_logit))
@@ -227,6 +227,8 @@ class RSSM(AbstractSSM):
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
     deter = self._core(deter, stoch, action, None, training)
+    if isinstance(tokens, dict):
+      tokens = jnp.concatenate([v for v in tokens.values()], -1)
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     post_logit = self._logit('obslogit', x, self.obslayers)
@@ -351,7 +353,7 @@ class TSSM(AbstractSSM):
 
     return result
 
-  def starts(self, entries, carry, actions, nlast):
+  def starts(self, entries, carry, actions, nlast, text_embeds=None):
     assert nlast > 0, (nlast, 0)
     pad_length = self.max_context_length - 1
     pad = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length), entries)
@@ -367,11 +369,20 @@ class TSSM(AbstractSSM):
     actions = concat([pad_action, jax.tree.map(lambda x: x[:, x.shape[1] - nlast + 1:x.shape[1]], actions)], 1)
     action_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), actions)
 
-    imagination_carry = (state_starts, action_starts['action'], is_last)
+    # Handle text embeddings: apply same windowing as states
+    text_starts = None
+    if text_embeds is not None:
+      text_pad = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length), text_embeds)
+      text_embeds = concat([text_pad, text_embeds], 1)
+      text_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), text_embeds)
+    print("TSSM.starts text_starts:", text_starts.shape, state_starts['deter'].shape if text_starts is not None else None)
+    imagination_carry = (state_starts, action_starts['action'], is_last, text_starts)
 
     return imagination_carry
 
-  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_last, reset, training, single=False, text_embeds=None):
+    if isinstance(tokens, dict):
+      tokens = jnp.concatenate([v for v in tokens.values()], -1)
     carry, tokens, action, is_last = nn.cast((carry, tokens, action, is_last['is_last']))
     action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
     post_logit = self._logit('obslogit', tokens, self.obslayers)
@@ -384,7 +395,7 @@ class TSSM(AbstractSSM):
       # Currently this mode is used only in agent.policy()
       # Assume that carry and action contain the context data for transformer inference
       carry = jax.tree.map(mask_last_steps, carry)
-      deter = self._core(None, carry['stoch'], action, is_last, training)
+      deter = self._core(None, carry['stoch'], action, is_last, training, text_embeds=text_embeds)
       carry['stoch'] = prepend(carry['stoch'][:, 1:], post_stoch[:, None])
       carry['deter'] = deter
       entries = {'deter': deter[:, -1], 'stoch': post_stoch}
@@ -396,7 +407,7 @@ class TSSM(AbstractSSM):
     # carry contains 'deter' and 'stoch' from the previous time step
     prev_post_stoch = prepend(carry['stoch'][:, None], post_stoch[:, :-1])
     prev_post_stoch = jax.tree.map(mask_last_steps, prev_post_stoch)
-    deter = self._core(None, prev_post_stoch, action, is_last, training)
+    deter = self._core(None, prev_post_stoch, action, is_last, training, text_embeds=text_embeds)
     carry['stoch'] = post_stoch[:, -1]
     carry['deter'] = deter[:, -1]
     entries = {'deter': deter, 'stoch': post_stoch}
@@ -405,20 +416,32 @@ class TSSM(AbstractSSM):
 
     return carry, entries, feat
 
-  def imagine(self, carry, policy, length, training, single=False):
+  def imagine(self, carry, policy, length, training, single=False, text_embeds=None):
     if single:
-      state_context, action_context, is_last = carry
+      state_context, action_context, is_last, text_context = carry
       current_state = jax.tree.map(lambda x: x[:, -1], state_context)
       action = policy(sg(current_state)) if callable(policy) else policy
       action_context = prepend(action_context[:, 1:], action['action'][:, None])
       actemb = nn.DictConcat(self.act_space, 1)({'action': action_context})
-      deter = self._core(None, state_context['stoch'], actemb, is_last, training)
+      
+      current_text_embed = None
+      if text_context is not None:
+        current_text_embed = jax.tree.map(lambda x: x[:, -1], text_context)
+        current_text_embed = jnp.expand_dims(current_text_embed, 0) 
+        current_text_embed = jnp.repeat(current_text_embed, state_context['stoch'].shape[0], axis=0)
+      print("In imagine single mode, current_text_embed:", current_text_embed.shape, state_context['stoch'].shape, text_embeds.shape if text_embeds is not None else None)
+      deter = self._core(None, state_context['stoch'], actemb, is_last, training, text_embeds=current_text_embed)
       current_prior_logit = self._logit('imglogit', deter[:, -1], self.imglayers)
       current_prior_stoch = nn.cast(self._dist(current_prior_logit).sample(seed=nj.seed()))
       state_context['deter'] = deter
       state_context['stoch'] = prepend(state_context['stoch'][:, 1:], current_prior_stoch[:, None])
       is_last = prepend(is_last[:, 1:], jnp.zeros_like(is_last[:, :1]))
-      carry = state_context, action_context, is_last
+      
+      # Update text context
+      if text_context is not None:
+        text_context = current_text_embed
+      
+      carry = state_context, action_context, is_last, text_context
       feat = nn.cast(dict(deter=deter[:, -1], stoch=current_prior_stoch, logit=current_prior_logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, current_prior_stoch, current_prior_logit))
       return carry, (feat, action)
@@ -437,7 +460,7 @@ class TSSM(AbstractSSM):
       # return carry, entries, feat, action
       return carry, feat, action
 
-  def _core(self, deter, stoch, action, is_last, training):
+  def _core(self, deter, stoch, action, is_last, training, text_embeds=None):
     # TODO: check transformer implementation: number of layer, dimensions and so on
     assert stoch.shape[:2] == is_last.shape[:2], (stoch.shape, is_last.shape)
     stoch = stoch.reshape((*stoch.shape[:2], -1))
@@ -456,7 +479,7 @@ class TSSM(AbstractSSM):
         'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
     }
     deter = self.sub('transformer', Transformer, **transformer_init_kwargs)(x, mask=mask, ts=episode_step_idx,
-                                                                            training=training)
+                                                                            training=training, text_embeds=text_embeds)
 
     return deter
 
@@ -495,10 +518,19 @@ class ObjectCentricTSSM(TSSM):
   transformer_dropout: float = 0.0
   transformer_position_embedding: str = 'sinusoidal' # 'sinusoidal', 'none'
 
+  #text fields
+  vec_keys: str = '.*'
+  img_keys: str = '.*'
+  slot_key: str = 'slot'
+
   def __init__(self, act_space, obs_space, **kw):
     super().__init__(act_space, obs_space, **kw)
     assert 'slot' in self.obs_space
     self.num_slots = self.obs_space['slot'].shape[0]
+    self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k != self.slot_key]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k != self.slot_key]
+    
 
   @property
   def entry_space(self):
@@ -525,17 +557,23 @@ class ObjectCentricTSSM(TSSM):
 
     return carry, action
 
-  def loss(self, carry, tokens, acts, is_last, reset, training):
-    carry, entries, losses, feat, metrics = super().loss(carry, tokens, acts, is_last, reset, training)
+  def loss(self, carry, tokens, acts, is_last, reset, training, text_embeds=None):
+    slot_tokens = {k: tokens[k] for k in self.slotkeys if k in tokens}
+    carry, entries, losses, feat, metrics = super().loss(carry, slot_tokens, acts, is_last, reset, training, text_embeds=text_embeds)
     losses = {k: v.mean(-1) for k, v in losses.items()}
 
     return carry, entries, losses, feat, metrics
+
+  def observe(self, carry, tokens, action, is_last, reset, training, single=False, text_embeds=None):
+    # Extract only slot tokens
+    slot_tokens = {k: tokens[k] for k in tokens if k in self.slotkeys}
+    return super().observe(carry, slot_tokens, action, is_last, reset, training, single, text_embeds=text_embeds)
 
   def truncate(self, entries, carry=None):
     assert entries['deter'].ndim == 4, entries['deter'].shape
     return self._truncate(entries, carry)
 
-  def _core(self, deter, stoch, action, is_last, training):
+  def _core(self, deter, stoch, action, is_last, training, text_embeds=None):
     assert stoch.shape[:2] == is_last.shape[:2], (stoch.shape, is_last.shape)
     stoch = stoch.reshape((*stoch.shape[:-2], -1))
     x = self.sub('dynin', nn.Linear, self.deter)(stoch)
@@ -555,8 +593,9 @@ class ObjectCentricTSSM(TSSM):
         'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
         'position_embedding': self.transformer_position_embedding,
     }
+    assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings"
     deter = self.sub('object_centric_dynamics', ObjectCentricDynamics, **init_kw)(x, mask=mask, ts=episode_step_idx,
-                                                                            training=training)
+                                                                            training=training, text_embeds=text_embeds)
     # cut off action-slot
     deter = deter[..., :-1, :]
 
@@ -575,13 +614,16 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
-  vec_keys: str = '.*'
-  img_keys: str = '.*'
+  # vec_keys: str = '.*'
+  # img_keys: str = '.*'
   slot_key: str = 'slot'
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
+    self.vec_keys = kw['vec_keys'] if 'vec_keys' in kw else '.*'
+    self.img_keys = kw['img_keys'] if 'img_keys' in kw else '.*'
+
     self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
     self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k != self.slot_key]
     self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k != self.slot_key]
@@ -590,7 +632,7 @@ class Encoder(nj.Module):
 
     if len(self.slotkeys) > 0:
       assert len(self.slotkeys) == 1, f'{self.slotkeys}'
-      assert len(self.veckeys) == 0, f'{self.veckeys}: slot observation cannot be mixed with vectors'
+      #assert len(self.veckeys) == 0, f'{self.veckeys}: slot observation cannot be mixed with vectors'
       assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
 
   @property
@@ -605,13 +647,13 @@ class Encoder(nj.Module):
 
   def __call__(self, carry, obs, reset, training, single=False):
     bdims = 1 if single else 2
-    outs = []
+    outs = {}
     bshape = reset.shape
 
     if self.slotkeys:
       x = obs[self.slot_key]
       x = x.reshape((-1, *x.shape[len(bshape):]))
-      outs.append(x)
+      outs[self.slot_key] = x
 
     if self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
@@ -619,10 +661,12 @@ class Encoder(nj.Module):
       squish = nn.symlog if self.symlog else lambda x: x
       x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
       x = x.reshape((-1, *x.shape[bdims:]))
-      for i in range(self.layers):
-        x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
-        x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
-      outs.append(x)
+      # for i in range(self.layers):
+      #   x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
+      #   x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
+      assert len(self.veckeys)==1, "Expected only token or token_embed as vector input"
+      for k in self.veckeys:  
+        outs[k] = x
 
     if self.imgkeys:
       K = self.kernel
@@ -643,10 +687,14 @@ class Encoder(nj.Module):
       assert 3 <= x.shape[-3] <= 16, x.shape
       assert 3 <= x.shape[-2] <= 16, x.shape
       x = x.reshape((x.shape[0], -1))
-      outs.append(x)
+      assert len(self.imgkeys)==1, "Expected only one image input"
+      for k in self.imgkeys:  
+        outs[k] = x
 
-    x = jnp.concatenate(outs, -1)
-    tokens = x.reshape((*bshape, *x.shape[1:]))
+    # x = jnp.concatenate(outs, -1)
+    for k,v in outs.items():
+      outs[k] = v.reshape((*bshape, *v.shape[1:]))
+    tokens = outs
     entries = {}
     return carry, entries, tokens
 

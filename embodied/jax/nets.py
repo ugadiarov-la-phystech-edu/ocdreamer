@@ -464,6 +464,62 @@ class Attention(nj.Module):
     return x
 
 
+class CrossAttention(Attention):
+
+  heads: int = 8
+  kv_heads: int = 0
+  dropout: float = 0.0
+  rope: bool = True
+  qknorm: str = 'none'
+  bias: bool = True
+  winit: str | Callable = Initializer('trunc_normal')
+  binit: str | Callable = Initializer('zeros')
+  outscale: float = 1.0
+
+  def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+
+  def __call__(self, slots, feats, mask=None, ts=None, training=True):
+    kw = dict(bias=self.bias, winit=self.winit, binit=self.binit)
+    B, T_q, D_q = slots.shape
+    B_f, T_k, D_f = feats.shape
+    assert T_q == T_k, f"Sequence length mismatch: {T_q} vs {T_k}"
+    assert B == B_f, f"Batch size mismatch: {B} vs {B_f}"
+    kv_heads = self.kv_heads or self.heads
+    assert self.heads % kv_heads == 0
+    head_ratio = self.heads // kv_heads
+    q = self.sub('to_q', Linear, D_q, **kw)(slots)
+    k = self.sub('to_k', Linear, D_q // head_ratio, **kw)(feats)
+    v = self.sub('to_v', Linear, D_q // head_ratio, **kw)(feats)
+    
+    q = einops.rearrange(q, 'b t (h d) -> b t h d', h=self.heads)
+    k = einops.rearrange(k, 'b t (h d) -> b t h d', h=kv_heads)
+    v = einops.rearrange(v, 'b t (h d) -> b t h d', h=kv_heads)
+
+    if self.qknorm != 'none':
+      q = self.sub('normq', Norm, self.qknorm)(q)
+      k = self.sub('normk', Norm, self.qknorm)(k)
+
+    if self.rope:
+      q = rope(q, ts)
+
+    q = einops.rearrange(q, 'b t (h g) d -> b t h g d', h=kv_heads)
+    logits = einops.einsum(q, k, 'b tq h g d, b tk h d -> b h g tq tk')
+    logits = logits * (1.0 / np.sqrt(k.shape[-1]))
+    logits = f32(logits)
+    if mask is not None:
+      assert mask.shape == (B, T_q, T_k), (mask.shape, (B, T_q, T_k))
+      mask = einops.rearrange(mask, 'b tq tk -> b 1 1 tq tk')
+      logits = jnp.where(mask, logits, -1e30)
+    weights = jax.nn.softmax(logits)
+    weights = weights.astype(slots.dtype)
+    weights = dropout(weights, self.dropout, training)
+    x = einops.einsum(weights, v, 'b h g tq tk, b tk h d -> b tq h g d')
+    x = einops.rearrange(x, 'b t h g d -> b t (h g d)')
+    x = self.sub('proj', Linear, D_q, **kw, outscale=self.outscale)(x)
+    return x
+
+
 class DictConcat:
 
   def __init__(self, spaces, fdims, squish=lambda x: x):
@@ -606,9 +662,11 @@ class Transformer(nj.Module):
   normalize_out: bool = False
   dropout: float = 0.0
   aggregation: bool = False
+  use_cross_attention: bool = False
 
-  def __call__(self, x, mask=None, ts=None, training=True):
+  def __call__(self, x, mask=None, ts=None, text_embeds=None, training=True):
     init_kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'rope', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
+    init_kw['use_cross_attention'] = self.use_cross_attention
     B, T, D = x.shape
     assert D == self.units, (D, self.units)
     out = []
@@ -621,7 +679,7 @@ class Transformer(nj.Module):
 
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
-        x = self.sub('transformer_layer', TransformerLayer, **init_kw)(x, mask, ts, training)
+        x = self.sub('transformer_layer', TransformerLayer, **init_kw)(x, mask, ts, text_embeds, training)
         out.append(x)
 
     if self.concatenate_over_layers:
@@ -690,16 +748,26 @@ class TransformerLayer(nj.Module):
   binit: str | Callable = Initializer('zeros')
   outscale: float = 1.0
   dropout: float = 0.0
+  use_cross_attention: bool = False
 
-  def __call__(self, x, mask=None, ts=None, training=True):
+
+  def __call__(self, x, mask=None, ts=None, text_embeds=None, training=True):
     kw = {k: getattr(self, k) for k in ('bias', 'winit', 'binit')}
     ak = {k: getattr(self, k) for k in ('heads', 'rope', 'qknorm', 'outscale', 'dropout')}
     D = x.shape[-1]
+    if text_embeds is not None:
+      text_embeds = text_embeds.astype(COMPUTE_DTYPE) #change from float32 to bfloat16
     assert D == self.units, (D, self.units)
     skip = x
     x = self.sub('norm1', Norm, self.norm)(x)
     x = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
     x += skip
+    if self.use_cross_attention:
+      skip = x
+      x = self.sub('norm_cross', Norm, self.norm)(x)
+      cross_attn = self.sub('cross_attn', CrossAttention, **kw, **ak)
+      x = cross_attn(x, text_embeds, mask=mask, ts=ts, training=training)
+      x += skip
     skip = x
     x = self.sub('norm2', Norm, self.norm)(x)
     if self.glu:
@@ -732,18 +800,27 @@ class ObjectCentricDynamicsLayer(nj.Module):
   binit: str | Callable = Initializer('zeros')
   outscale: float = 1.0
   dropout: float = 0.0
+  use_cross_attention: bool = True
 
-  def __call__(self, x, mask=None, ts=None, training=True):
+  def __call__(self, x, mask=None, ts=None, text_embeds=None, training=True):
     kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
     kw['rope'] = False
+    kw['use_cross_attention'] = self.use_cross_attention
+    print(text_embeds.shape, x.shape)
     B, T, num_slots, slot_dim = x.shape
     x = x.reshape(B * T, num_slots, slot_dim)
-    x = self.sub('object_encoder_block', TransformerLayer, **kw)(x, mask=None, ts=None, training=training)
+    #if text_embeds.ndim == 3:
+    text_embeds = text_embeds.reshape(B * T, *text_embeds.shape[2:])
+    text_embeds = text_embeds[:, None, :]
+    text_embeds = jnp.repeat(text_embeds, num_slots, axis=1)
+    x = self.sub('object_encoder_block', TransformerLayer, **kw)(x, mask=None, ts=None, training=training, text_embeds=text_embeds)
     x = x.reshape(B, T, num_slots, slot_dim)
+    text_embeds = text_embeds.reshape(B, T, num_slots, -1)
 
     x = jnp.swapaxes(x, 1, 2).reshape(B * num_slots, T, slot_dim)
-    mask = jnp.repeat(mask, num_slots, axis=0)
-    x = self.sub('time_encoder_block', TransformerLayer, **kw)(x, mask, ts=None, training=training)
+    text_embeds = jnp.swapaxes(text_embeds, 1, 2).reshape(B * num_slots, T, -1)
+    mask = jnp.repeat(mask, num_slots, axis=0) if mask is not None else None
+    x = self.sub('time_encoder_block', TransformerLayer, **kw)(x, mask, ts=None, text_embeds=text_embeds, training=training)
     x = jnp.swapaxes(x.reshape(B, num_slots, T, slot_dim), 1, 2)
 
     return x
@@ -789,7 +866,7 @@ class ObjectCentricDynamics(nj.Module):
 
     return position_embedding
 
-  def __call__(self, x, mask=None, ts=None, training=True):
+  def __call__(self, x, mask=None, ts=None, text_embeds=None, training=True):
     num_slots = x.shape[-2]
     input_x = x
     if self.position_embedding == 'sinusoidal':
@@ -798,7 +875,7 @@ class ObjectCentricDynamics(nj.Module):
     kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
-        x = self.sub('object_centric_dynamics_layer', ObjectCentricDynamicsLayer, **kw)(x, mask, ts, training)
+        x = self.sub('object_centric_dynamics_layer', ObjectCentricDynamicsLayer, **kw)(x, mask, ts, text_embeds, training)
 
     if self.residual:
       x = x + input_x

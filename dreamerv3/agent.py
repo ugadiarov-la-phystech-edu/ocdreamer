@@ -155,8 +155,13 @@ class Agent(embodied.jax.Agent):
     kw = dict(training=False, single=True)
     reset = obs['is_first']
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
-    dyn_carry, dyn_entry, feat = self.dyn.observe(
-        dyn_carry, tokens, prevact, is_last, reset, **kw)
+    # TODO: do not only from T5 embeddings
+    text_embeds = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds = obs[self.enc.veckeys[0]]
+      assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings in policy()"
+    print("In policy(), text_embeds shape:", text_embeds.shape if text_embeds is not None else None, dyn_carry['stoch'].shape, tokens['slot'].shape)
+    dyn_carry, dyn_entry, feat = self.dyn.observe(dyn_carry, tokens, prevact, is_last, reset, text_embeds=text_embeds, **kw)
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
@@ -203,11 +208,15 @@ class Agent(embodied.jax.Agent):
     losses = {}
     metrics = {}
 
+    text_embeds_wm = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds_wm = obs[self.enc.veckeys[0]]
+      assert text_embeds_wm is not None, "ObjectCentricTSSM requires text embeddings"
     # World model
     enc_carry, enc_entries, tokens = self.enc(
         enc_carry, obs, reset, training)
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
-        dyn_carry, tokens, prevact, is_last, reset, training)
+        dyn_carry, tokens, prevact, is_last, reset, training, text_embeds=text_embeds_wm)
     losses.update(los)
     metrics.update(mets)
     dec_carry, dec_entries, recons = self.dec(
@@ -239,7 +248,12 @@ class Agent(embodied.jax.Agent):
     # Imagination
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
-    starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, K)
+    text_embeds = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds = obs[self.enc.veckeys[0]]
+      assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings"
+    
+    starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, K, text_embeds=text_embeds)
     policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1, training=training))
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training=False)
     first = jax.tree.map(
@@ -326,12 +340,25 @@ class Agent(embodied.jax.Agent):
     secondhalf = lambda xs: jax.tree.map(lambda x: x[:RB, T // 2:], xs)
     dyn_carry = jax.tree.map(lambda x: x[:RB], dyn_carry)
     dec_carry = jax.tree.map(lambda x: x[:RB], dec_carry)
+    text_embeds_report = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds_report = firsthalf(obs[self.enc.veckeys[0]])
+      assert text_embeds_report is not None, "ObjectCentricTSSM requires text embeddings in report()"
     dyn_carry, _, obsfeat = self.dyn.observe(
         dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact), firsthalf(is_last),
-        firsthalf(obs['is_first']), training=False)
+        firsthalf(obs['is_first']), training=False,text_embeds=text_embeds_report)
     imagination_states = jax.tree.map(lambda x: x[:, None], dyn_carry)
     imagination_actions = jax.tree.map(lambda x: x[:RB, :1], prevact)
-    imagination_carry = self.dyn.starts(imagination_states, dyn_carry, imagination_actions, nlast=1)
+    
+    text_embeds_report = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds_report = obs[self.enc.veckeys[0]]
+      assert text_embeds_report is not None, "ObjectCentricTSSM requires text embeddings"
+    
+    imagination_carry = self.dyn.starts(imagination_states, dyn_carry, imagination_actions, nlast=1, text_embeds=text_embeds_report)
+    # if self.config.dyn.typ == 'octssm':
+    #   text_embeds_imag = secondhalf(obs[self.enc.veckeys[0]])
+    #   assert text_embeds_imag is not None, "ObjectCentricTSSM requires text embeddings in imagination (report)"
     _, imgfeat, _ = self.dyn.imagine(
         imagination_carry, secondhalf(prevact), length=T - T // 2, training=False)
     dec_carry, _, obsrecons = self.dec(
