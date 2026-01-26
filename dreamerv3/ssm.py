@@ -373,9 +373,8 @@ class TSSM(AbstractSSM):
     text_starts = None
     if text_embeds is not None:
       text_pad = jax.tree.map(lambda x: self._zeros_like_expanded(x, pad_length), text_embeds)
-      text_embeds = concat([text_pad, text_embeds], 1)
+      text_embeds = concat([text_pad, jax.tree.map(lambda x: x[:, -nlast:], text_embeds)], 1)
       text_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), text_embeds)
-    print("TSSM.starts text_starts:", text_starts.shape, state_starts['deter'].shape if text_starts is not None else None)
     imagination_carry = (state_starts, action_starts['action'], is_last, text_starts)
 
     return imagination_carry
@@ -423,13 +422,9 @@ class TSSM(AbstractSSM):
       action = policy(sg(current_state)) if callable(policy) else policy
       action_context = prepend(action_context[:, 1:], action['action'][:, None])
       actemb = nn.DictConcat(self.act_space, 1)({'action': action_context})
-      
       current_text_embed = None
       if text_context is not None:
-        current_text_embed = jax.tree.map(lambda x: x[:, -1], text_context)
-        current_text_embed = jnp.expand_dims(current_text_embed, 0) 
-        current_text_embed = jnp.repeat(current_text_embed, state_context['stoch'].shape[0], axis=0)
-      print("In imagine single mode, current_text_embed:", current_text_embed.shape, state_context['stoch'].shape, text_embeds.shape if text_embeds is not None else None)
+        current_text_embed = text_context
       deter = self._core(None, state_context['stoch'], actemb, is_last, training, text_embeds=current_text_embed)
       current_prior_logit = self._logit('imglogit', deter[:, -1], self.imglayers)
       current_prior_stoch = nn.cast(self._dist(current_prior_logit).sample(seed=nj.seed()))

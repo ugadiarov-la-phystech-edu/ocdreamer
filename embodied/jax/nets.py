@@ -806,7 +806,6 @@ class ObjectCentricDynamicsLayer(nj.Module):
     kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
     kw['rope'] = False
     kw['use_cross_attention'] = self.use_cross_attention
-    print(text_embeds.shape, x.shape)
     B, T, num_slots, slot_dim = x.shape
     x = x.reshape(B * T, num_slots, slot_dim)
     #if text_embeds.ndim == 3:

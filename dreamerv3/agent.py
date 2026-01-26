@@ -130,12 +130,21 @@ class Agent(embodied.jax.Agent):
 
   def init_policy(self, batch_size):
     carry, action = self.dyn.initial_with_context(batch_size)
+    # Initialize rolling text context window if a text vector key exists
+    text_context = None
+    if len(self.enc.veckeys)>0:
+      text_key = self.enc.veckeys[0]
+      text_shape = self.obs_space[text_key].shape
+      B = batch_size
+      T = action['action'].shape[1]
+      text_context = jnp.zeros((B, T, *text_shape), self.obs_space[text_key].dtype)
     return (
         self.enc.initial(batch_size),
         carry,
         self.dec.initial(batch_size),
         action,
         {'is_last': jnp.ones(action['action'].shape[:2], dtype=i32)},
+        text_context,
     )
 
   def init_train(self, batch_size):
@@ -151,17 +160,21 @@ class Agent(embodied.jax.Agent):
     return self.init_train(batch_size)
 
   def policy(self, carry, obs, mode='train'):
-    (enc_carry, dyn_carry, dec_carry, prevact, is_last) = carry
+    (enc_carry, dyn_carry, dec_carry, prevact, is_last, text_context) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
-    # TODO: do not only from T5 embeddings
-    text_embeds = None
-    if self.config.dyn.typ == 'octssm':
-      text_embeds = obs[self.enc.veckeys[0]]
-      assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings in policy()"
-    print("In policy(), text_embeds shape:", text_embeds.shape if text_embeds is not None else None, dyn_carry['stoch'].shape, tokens['slot'].shape)
-    dyn_carry, dyn_entry, feat = self.dyn.observe(dyn_carry, tokens, prevact, is_last, reset, text_embeds=text_embeds, **kw)
+    dyn_kwargs = dict(**kw)
+    if self.config.dyn.typ != 'rssm' and len(self.enc.veckeys)>0:
+      text_key = self.enc.veckeys[0]
+      current_text = obs[text_key]
+      if text_context is None:
+        B = current_text.shape[0]
+        T = prevact['action'].shape[1]
+        text_context = jnp.zeros((B, T, *current_text.shape[1:]), current_text.dtype)
+      text_context = prepend(text_context[:, 1:], current_text[:, None])
+      dyn_kwargs['text_embeds'] = text_context
+    dyn_carry, dyn_entry, feat = self.dyn.observe(dyn_carry, tokens, prevact, is_last, reset, **dyn_kwargs)
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
@@ -174,7 +187,7 @@ class Agent(embodied.jax.Agent):
 
     prevact['action'] = prepend(prevact['action'][:, 1:], act['action'][:, None])
     is_last['is_last'] = prepend(is_last['is_last'][:, 1:], obs['is_last'][:, None].astype(is_last['is_last'].dtype))
-    carry = (enc_carry, dyn_carry, dec_carry, prevact, is_last)
+    carry = (enc_carry, dyn_carry, dec_carry, prevact, is_last, text_context)
 
     if self.config.replay_context:
       out.update(elements.tree.flatdict(dict(
