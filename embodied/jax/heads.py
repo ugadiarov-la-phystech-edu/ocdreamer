@@ -128,7 +128,7 @@ class Head(nj.Module):
       raise NotImplementedError(self.impl)
     x = nets.ensure_dtypes(x)
     output = getattr(self, self.impl)(x)
-    if self.space.shape:
+    if self.space.shape and self.impl not in ('onehot'):
       output = outs.Agg(output, len(self.space.shape), jnp.sum)
     assert output.pred().shape[x.ndim - 1:] == self.space.shape, (
         self.space, self.impl, x.shape, output.pred().shape)

@@ -130,14 +130,7 @@ class Agent(embodied.jax.Agent):
 
   def init_policy(self, batch_size):
     carry, action = self.dyn.initial_with_context(batch_size)
-    # Initialize rolling text context window if a text vector key exists
     text_context = None
-    if len(self.enc.veckeys)>0:
-      text_key = self.enc.veckeys[0]
-      text_shape = self.obs_space[text_key].shape
-      B = batch_size
-      T = action['action'].shape[1]
-      text_context = jnp.zeros((B, T, *text_shape), self.obs_space[text_key].dtype)
     return (
         self.enc.initial(batch_size),
         carry,
@@ -165,9 +158,9 @@ class Agent(embodied.jax.Agent):
     reset = obs['is_first']
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
     dyn_kwargs = dict(**kw)
-    if self.config.dyn.typ != 'rssm' and len(self.enc.veckeys)>0:
+    if self.config.dyn.typ == 'octssm':
       text_key = self.enc.veckeys[0]
-      current_text = obs[text_key]
+      current_text = tokens[text_key]
       if text_context is None:
         B = current_text.shape[0]
         T = prevact['action'].shape[1]
@@ -221,38 +214,39 @@ class Agent(embodied.jax.Agent):
     losses = {}
     metrics = {}
 
-    text_embeds_wm = None
-    if self.config.dyn.typ == 'octssm':
-      text_embeds_wm = obs[self.enc.veckeys[0]]
-      assert text_embeds_wm is not None, "ObjectCentricTSSM requires text embeddings"
     # World model
-    enc_carry, enc_entries, tokens = self.enc(
-        enc_carry, obs, reset, training)
+    enc_carry, enc_entries, tokens = self.enc(enc_carry, obs, reset, training)
+    text_embeds = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds = tokens[self.enc.veckeys[0]]
+      assert text_embeds is not None, 'ObjectCentricTSSM requires text embeddings'
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
-        dyn_carry, tokens, prevact, is_last, reset, training, text_embeds=text_embeds_wm)
+        dyn_carry, tokens, prevact, is_last, reset, training, text_embeds=text_embeds)
     losses.update(los)
     metrics.update(mets)
-    dec_carry, dec_entries, recons = self.dec(
-        dec_carry, repfeat, reset, training)
+
+    dec_carry, dec_entries, recons = self.dec(dec_carry, repfeat, reset, training)
     inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)
     losses['rew'] = self.rew(inp, 2, training=training).loss(obs['reward'])
     con = f32(~obs['is_terminal'])
     if self.config.contdisc:
       con *= 1 - 1 / self.config.horizon
     losses['con'] = self.con(self.feat2tensor(repfeat), 2, training=training).loss(con)
+
     for key, recon in recons.items():
       space, value = self.obs_space[key], obs[key]
-      assert value.dtype == space.dtype, (key, space, value.dtype)
+      #assert value.dtype == space.dtype, (key, space, value.dtype)
       target = f32(value) / 255 if isimage(space) else value
+      target = jax.nn.one_hot(target, self.obs_space[key].high) if key == 'token' else target
       losses[key] = recon.loss(sg(target))
-    if self.config.loss_scales["lm"] >  0:
+    if 'lm' in self.scales.keys():
       print("Adding LM loss")
       next_ac = prevact[:, :-1].reshape((-1, 1, *prevact.shape[2:]))
       context = {'feat': repfeat[:, :-1].reshape((-1, *repfeat.shape[2:]))}
       one_step = self.dec(self.dyn.imagine(next_ac, context, False))
       truth = obs['token'][:, 1:].reshape((-1, 1, *obs['token'].shape[2:]))
       nll = -(one_step["token"].log_prob(truth)).mean(-1)
-      losses['lm'] = (nll * scales["lm"]).mean()
+      losses['lm'] = (nll * self.scales["lm"]).mean()
 
     B, T = reset.shape
     shapes = {k: v.shape for k, v in losses.items()}
@@ -261,11 +255,6 @@ class Agent(embodied.jax.Agent):
     # Imagination
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
-    text_embeds = None
-    if self.config.dyn.typ == 'octssm':
-      text_embeds = obs[self.enc.veckeys[0]]
-      assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings"
-    
     starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, K, text_embeds=text_embeds)
     policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1, training=training))
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training=False)
@@ -323,14 +312,17 @@ class Agent(embodied.jax.Agent):
     return loss, (carry, entries, outs, metrics)
 
   def report(self, carry, data):
+    #data = self.preprocess(data)
     if not self.config.report:
       return carry, {}
 
     carry, obs, prevact, is_last, _ = self._apply_replay_context(carry, data)
     (enc_carry, dyn_carry, dec_carry) = carry
     B, T = obs['is_first'].shape
+    reset= obs['is_first']
     RB = min(6, B)
     metrics = {}
+    enc_carry, enc_entries, tokens = self.enc(enc_carry, obs, reset, training=False)
 
     # Train metrics
     _, (new_carry, entries, outs, mets) = self.loss(
@@ -355,7 +347,7 @@ class Agent(embodied.jax.Agent):
     dec_carry = jax.tree.map(lambda x: x[:RB], dec_carry)
     text_embeds_report = None
     if self.config.dyn.typ == 'octssm':
-      text_embeds_report = firsthalf(obs[self.enc.veckeys[0]])
+      text_embeds_report = firsthalf(tokens[self.enc.veckeys[0]])
       assert text_embeds_report is not None, "ObjectCentricTSSM requires text embeddings in report()"
     dyn_carry, _, obsfeat = self.dyn.observe(
         dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact), firsthalf(is_last),
@@ -363,15 +355,7 @@ class Agent(embodied.jax.Agent):
     imagination_states = jax.tree.map(lambda x: x[:, None], dyn_carry)
     imagination_actions = jax.tree.map(lambda x: x[:RB, :1], prevact)
     
-    text_embeds_report = None
-    if self.config.dyn.typ == 'octssm':
-      text_embeds_report = obs[self.enc.veckeys[0]]
-      assert text_embeds_report is not None, "ObjectCentricTSSM requires text embeddings"
-    
     imagination_carry = self.dyn.starts(imagination_states, dyn_carry, imagination_actions, nlast=1, text_embeds=text_embeds_report)
-    # if self.config.dyn.typ == 'octssm':
-    #   text_embeds_imag = secondhalf(obs[self.enc.veckeys[0]])
-    #   assert text_embeds_imag is not None, "ObjectCentricTSSM requires text embeddings in imagination (report)"
     _, imgfeat, _ = self.dyn.imagine(
         imagination_carry, secondhalf(prevact), length=T - T // 2, training=False)
     dec_carry, _, obsrecons = self.dec(
@@ -473,6 +457,25 @@ class Agent(embodied.jax.Agent):
       sched = optax.join_schedules([ramp, sched], [warmup])
     chain.append(optax.scale_by_learning_rate(sched))
     return optax.chain(*chain)
+  
+  def preprocess(self, obs):
+    obs = obs.copy()
+    for key, value in obs.items():
+      if key.startswith('log') or key in ('key',):
+        continue
+      if key in ('is_first', 'is_last', 'is_terminal'):
+        obs[key] = value.astype(jnp.bool_)
+        continue
+      elif key == "token":
+        value = jax.nn.one_hot(value, self.obs_space[key].high)
+        value = value.astype(nn.COMPUTE_DTYPE)
+      elif len(value.shape) > 3 and value.dtype == jnp.uint8:
+        value = jax.tree_map(lambda x: x.astype(nn.COMPUTE_DTYPE), value) / 255.0
+      else:
+        value = value.astype(jnp.float32)
+      obs[key] = value
+    obs['cont'] = 1.0 - obs['is_terminal'].astype(jnp.float32)
+    return obs
 
 
 def imag_loss(

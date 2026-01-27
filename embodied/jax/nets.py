@@ -808,7 +808,6 @@ class ObjectCentricDynamicsLayer(nj.Module):
     kw['use_cross_attention'] = self.use_cross_attention
     B, T, num_slots, slot_dim = x.shape
     x = x.reshape(B * T, num_slots, slot_dim)
-    #if text_embeds.ndim == 3:
     text_embeds = text_embeds.reshape(B * T, *text_embeds.shape[2:])
     text_embeds = text_embeds[:, None, :]
     text_embeds = jnp.repeat(text_embeds, num_slots, axis=1)

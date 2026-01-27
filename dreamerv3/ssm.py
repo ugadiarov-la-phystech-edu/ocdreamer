@@ -415,7 +415,7 @@ class TSSM(AbstractSSM):
 
     return carry, entries, feat
 
-  def imagine(self, carry, policy, length, training, single=False, text_embeds=None):
+  def imagine(self, carry, policy, length, training, single=False):
     if single:
       state_context, action_context, is_last, text_context = carry
       current_state = jax.tree.map(lambda x: x[:, -1], state_context)
@@ -513,9 +513,7 @@ class ObjectCentricTSSM(TSSM):
   transformer_dropout: float = 0.0
   transformer_position_embedding: str = 'sinusoidal' # 'sinusoidal', 'none'
 
-  #text fields
-  vec_keys: str = '.*'
-  img_keys: str = '.*'
+ 
   slot_key: str = 'slot'
 
   def __init__(self, act_space, obs_space, **kw):
@@ -523,8 +521,6 @@ class ObjectCentricTSSM(TSSM):
     assert 'slot' in self.obs_space
     self.num_slots = self.obs_space['slot'].shape[0]
     self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k != self.slot_key]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k != self.slot_key]
     
 
   @property
@@ -609,15 +605,13 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
-  # vec_keys: str = '.*'
-  # img_keys: str = '.*'
   slot_key: str = 'slot'
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    self.vec_keys = kw['vec_keys'] if 'vec_keys' in kw else '.*'
-    self.img_keys = kw['img_keys'] if 'img_keys' in kw else '.*'
+    self.vec_keys = kw.pop('vec_keys', '.*')
+    self.img_keys = kw.pop('img_keys', '.*')
 
     self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
     self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k != self.slot_key]
@@ -627,7 +621,6 @@ class Encoder(nj.Module):
 
     if len(self.slotkeys) > 0:
       assert len(self.slotkeys) == 1, f'{self.slotkeys}'
-      #assert len(self.veckeys) == 0, f'{self.veckeys}: slot observation cannot be mixed with vectors'
       assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
 
   @property
@@ -640,12 +633,12 @@ class Encoder(nj.Module):
   def truncate(self, entries, carry=None):
     return {}
 
-  def __call__(self, carry, obs, reset, training, single=False):
+  def __call__(self, carry, obs, reset, training, single=False, only_text=False):
     bdims = 1 if single else 2
     outs = {}
     bshape = reset.shape
 
-    if self.slotkeys:
+    if self.slotkeys and not only_text:
       x = obs[self.slot_key]
       x = x.reshape((-1, *x.shape[len(bshape):]))
       outs[self.slot_key] = x
@@ -656,6 +649,7 @@ class Encoder(nj.Module):
       squish = nn.symlog if self.symlog else lambda x: x
       x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
       x = x.reshape((-1, *x.shape[bdims:]))
+      #x = nn.COMPUTE_DTYPE(x) # ensure compute dtype
       # for i in range(self.layers):
       #   x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
       #   x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
@@ -663,7 +657,7 @@ class Encoder(nj.Module):
       for k in self.veckeys:  
         outs[k] = x
 
-    if self.imgkeys:
+    if self.imgkeys and not only_text:
       K = self.kernel
       imgs = [obs[k] for k in sorted(self.imgkeys)]
       assert all(x.dtype == jnp.uint8 for x in imgs)
@@ -687,9 +681,9 @@ class Encoder(nj.Module):
         outs[k] = x
 
     # x = jnp.concatenate(outs, -1)
-    for k,v in outs.items():
-      outs[k] = v.reshape((*bshape, *v.shape[1:]))
-    tokens = outs
+    tokens = {}
+    for k, v in outs.items():
+        tokens[k] = v.reshape((*bshape, *v.shape[1:]))
     entries = {}
     return carry, entries, tokens
 
@@ -708,24 +702,27 @@ class Decoder(nj.Module):
   bspace: int = 8
   outer: bool = False
   strided: bool = False
-  vec_keys: str = '.*'
-  img_keys: str = '.*'
+  # vec_keys: str = '.*'
+  # img_keys: str = '.*'
   slot_key: str = 'slot'
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
+    self.vec_keys =  kw.pop('vec_keys', '.*')
+    self.img_keys =  kw.pop('img_keys', '.*')
     self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
     self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k != self.slot_key]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k != self.slot_key]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k != self.slot_key]   
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.imgdep = sum(obs_space[k].shape[-1] for k in self.imgkeys)
-    self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
+    if self.imgkeys:
+      self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
     self.kw = kw
-
+    self.vec_dist = kw.pop('vec_dist', None)
+  
     if len(self.slotkeys) > 0:
       assert len(self.slotkeys) == 1, f'{self.slotkeys}'
-      assert len(self.veckeys) == 0, f'{self.veckeys}: slot observation cannot be mixed with vectors'
       assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
 
   @property
@@ -756,19 +753,21 @@ class Decoder(nj.Module):
       spaces = {k: self.obs_space[k].shape[-1:] for k in self.slotkeys}
       outputs = {k: 'symlog_mse' if self.symlog else 'mse' for k, v in spaces.items()}
       kw = dict(**self.kw, act=self.act, norm=self.norm)
-      x = self.sub('mlp', nn.MLP, self.layers, self.units, **kw)(inp)
+      x = self.sub('mlp_slots', nn.MLP, self.layers, self.units, **kw)(inp)
       x = x.reshape((*bshape, *x.shape[1:]))
       kw = dict(**self.kw, outscale=self.outscale)
-      outs = self.sub('vec', embodied.jax.DictHead, spaces, outputs, **kw)(x)
+      outs = self.sub('slot', embodied.jax.DictHead, spaces, outputs, **kw)(x)
       outs = {k: embodied.jax.outs.Agg(v, 1, jnp.sum) for k, v in outs.items()}
       recons.update(outs)
-
+    bshape = bshape[:-1] if self.slotkeys else bshape
+    inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
+    inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
+    inp = jnp.concatenate(inp, -1)
     if self.veckeys:
       spaces = {k: self.obs_space[k] for k in self.veckeys}
-      o1, o2 = 'categorical', ('symlog_mse' if self.symlog else 'mse')
-      outputs = {k: o1 if v.discrete else o2 for k, v in spaces.items()}
+      outputs = {k: self.vec_dist for k in spaces.keys()}
       kw = dict(**self.kw, act=self.act, norm=self.norm)
-      x = self.sub('mlp', nn.MLP, self.layers, self.units, **kw)(inp)
+      x = self.sub('mlp_vec', nn.MLP, self.layers, self.units, **kw)(inp)
       x = x.reshape((*bshape, *x.shape[1:]))
       kw = dict(**self.kw, outscale=self.outscale)
       outs = self.sub('vec', embodied.jax.DictHead, spaces, outputs, **kw)(x)
