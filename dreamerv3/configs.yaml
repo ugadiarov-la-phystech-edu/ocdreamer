@@ -36,7 +36,7 @@ defaults:
     dmc: {size: [64, 64], repeat: 1, proprio: True, image: True, camera: -1}
     loconav: {size: [64, 64], repeat: 1, camera: -1}
     homegrid: {size: [64, 64], max_steps: 100, num_trashobjs: 2, num_trashcans: 2, p_teleport: 0.05, p_unsafe: 0.0, vis: False}
-
+    messenger: {size: [16,16], length: 64, vis: False}
 
   replay:
     size: 5e6
@@ -59,6 +59,7 @@ defaults:
     eval_eps: 1
     report_batches: 1
     from_checkpoint: ''
+    from_checkpoint_regex: '.*' 
     episode_timeout: 180
     actor_addr: 'localhost:{auto}'
     replay_addr: 'localhost:{auto}'
@@ -88,7 +89,7 @@ defaults:
     profiler: True
 
   agent:
-    loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3, token: 1.0, lm: 0.0}
+    loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3, lm: 0.0}
     opt: {lr: 4e-5, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.0, schedule: const, warmup: 1000, anneal: 0}
     ac_grads: False
     dyn:
@@ -98,10 +99,10 @@ defaults:
       octssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, free_nats: 1.0, max_context_length: 64, transformer_layers: 6, transformer_heads: 8, transformer_ffup: 4, transformer_act: silu, transformer_norm: layer, transformer_glu: False, transformer_position_embedding: sinusoidal, transformer_qknorm: none, transformer_bias: True, transformer_outscale: 1.0, transformer_concatenate_over_layers: True, transformer_normalize_out: False, transformer_dropout: 0.0}
     enc:
       typ: simple
-      simple: {vec_keys: '.*', img_keys: '.*', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
+      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
     dec:
       typ: simple
-      simple: {vec_keys: '.*', img_keys: '.*', vec_dist: symlog_mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
+      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', vec_dist: symlog_mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
     rewhead:
       typ: mlp
       mlp: { layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255 }
@@ -232,6 +233,33 @@ homegrid:
   agent.conhead.layers: 5
   agent.policy.layers: 5
   agent.value.layers: 5
+
+messenger:
+  task: messenger_si
+  run.envs: 16
+  env.messenger.length: 4
+  agent.enc.simple.vec_keys: token_embed
+  agent.enc.simple.img_keys: image
+  #agent.enc.simple.depth: 96
+  agent.dec.simple.vec_keys: token_embed
+  agent.dec.simple.img_keys: image
+  #agent.dec.simple.depth: 96
+  run.train_ratio: 64
+  batch_size: 16
+  batch_length: 256 
+  # replay.size: 1e6
+  # agent.dyn.tssm.deter: 4096
+  # agent.dyn.tssm.classes: 32
+  # agent.rewhead.layers: 5
+  # agent.conhead.layers: 5
+  # agent.policy.layers: 5
+  # agent.value.layers: 5 
+  # agent.enc.simple.mults: [2, 3]
+  # agent.enc.simple.layers: 5
+  # agent.dec.simple.mults: [2, 3]
+  # agent.dec.simple.layers: 5
+  # run.steps: 1e6
+
 
 multicpu:
   batch_size: 12

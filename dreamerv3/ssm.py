@@ -124,10 +124,10 @@ class AbstractSSM(nj.Module):
     carry = jax.tree.map(lambda x: x[:, -1], entries)
     return carry
 
-  def starts(self, entries, carry, actions, nlast):
+  def starts(self, entries, carry, actions, nlast, text_embeds=None):
     raise NotImplementedError
 
-  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_last, reset, training, single=False, text_embeds=None):
     raise NotImplementedError
 
   def imagine(self, carry, policy, length, training, single=False):
@@ -199,12 +199,12 @@ class RSSM(AbstractSSM):
   def _deter_out_dim(self):
     return self.deter
 
-  def starts(self, entries, carry, actions, nlast):
+  def starts(self, entries, carry, actions, nlast, text_embeds=None):  
     B = len(jax.tree.leaves(carry)[0])
     return jax.tree.map(
         lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
 
-  def observe(self, carry, tokens, action, is_last, reset, training, single=False):
+  def observe(self, carry, tokens, action, is_last, reset, training, single=False, text_embeds=None):
     assert self.max_context_length == 1, f'RSSM: assume that max_context_length == 1: {(self.max_context_length, 1)}'
     carry, tokens, action = nn.cast((carry, tokens, action))
     if single:
@@ -605,17 +605,17 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
-  slot_key: str = 'slot'
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
     self.vec_keys = kw.pop('vec_keys', '.*')
     self.img_keys = kw.pop('img_keys', '.*')
+    self.slot_keys = kw.pop('slot_keys', '.*')
 
-    self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k != self.slot_key]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k != self.slot_key]
+    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k)]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k)]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k)]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
 
@@ -639,9 +639,9 @@ class Encoder(nj.Module):
     bshape = reset.shape
 
     if self.slotkeys and not only_text:
-      x = obs[self.slot_key]
+      x = obs[self.slot_keys]
       x = x.reshape((-1, *x.shape[len(bshape):]))
-      outs[self.slot_key] = x
+      outs[self.slot_keys] = x
 
     if self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
@@ -649,7 +649,7 @@ class Encoder(nj.Module):
       squish = nn.symlog if self.symlog else lambda x: x
       x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
       x = x.reshape((-1, *x.shape[bdims:]))
-      #x = nn.COMPUTE_DTYPE(x) # ensure compute dtype
+      # x = nn.cast(x)  # ensure compute dtype
       # for i in range(self.layers):
       #   x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
       #   x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
@@ -711,9 +711,11 @@ class Decoder(nj.Module):
     self.obs_space = obs_space
     self.vec_keys =  kw.pop('vec_keys', '.*')
     self.img_keys =  kw.pop('img_keys', '.*')
-    self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k != self.slot_key]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k != self.slot_key]   
+    self.slot_keys = kw.pop('slot_keys', '.*')
+
+    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k)]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k not in self.slotkeys]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k not in self.slotkeys]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.imgdep = sum(obs_space[k].shape[-1] for k in self.imgkeys)
     if self.imgkeys:

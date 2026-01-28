@@ -11,3 +11,5 @@ from .core import *
 from . import envs
 from . import jax
 from . import run
+
+from .envs.messenger import make_image

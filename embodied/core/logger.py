@@ -37,18 +37,22 @@ class CometOutput:
         experiment.log_histogram_3d(value, name=name, step=step)
       elif len(value.shape) in (2, 3):
         value = value[..., None] if len(value.shape) == 2 else value
-        assert value.shape[3] in [1, 3, 4], value.shape
+        if value.shape[-1]==17:
+          continue
+        assert value.shape[-1] in [1, 3, 4], value.shape
         if value.dtype != np.uint8:
           value = (255 * np.clip(value, 0, 1)).astype(np.uint8)
         value = np.transpose(value, [2, 0, 1])
         experiment.log_image(value, name=name, step=step)
       elif len(value.shape) == 4:
+        if value.shape[-1]==17:
+          continue
         from moviepy.editor import ImageSequenceClip
         # Sanity check that the channel dimension is the last
-        assert value.shape[3] in [1, 3, 4], f"Invalid shape: {value.shape}"
-        if value.shape[3] == 1:
-            value = np.repeat(value, 3, axis=3)
-        elif value.shape[3] == 4:
+        assert value.shape[-1] in [1, 3, 4], f"Invalid shape: {value.shape}"
+        if value.shape[-1] == 1:
+            value = np.repeat(value, 3, axis=-1)
+        elif value.shape[-1] == 4:
             value = value[..., :3]
         # If the video is a float, convert it to uint8
         if np.issubdtype(value.dtype, np.floating):

@@ -238,6 +238,7 @@ def make_env(config, index, **overrides):
       'procgen': 'embodied.envs.procgen:ProcGen',
       'bsuite': 'embodied.envs.bsuite:BSuite',
       'homegrid': 'embodied.envs.homegrid:HomeGrid',
+      'messenger': 'embodied.envs.messenger:Messenger',
       'memmaze': lambda task, **kw: from_gym.FromGym(
           f'MemoryMaze-{task}-v0', **kw),
   }[suite]

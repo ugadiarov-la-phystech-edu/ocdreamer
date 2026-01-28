@@ -250,16 +250,17 @@ class CheckSpaces(Wrapper):
 
   def step(self, action):
     for key, value in action.items():
-      if "language" in key or key.startswith("log_"): continue
+      if "language" in key or key.startswith("log"): continue
       self._check(value, self.env.act_space[key], key)
     obs = self.env.step(action)
     for key, value in obs.items():
+      if "language" in key or key.startswith("log"): continue
       self._check(value, self.env.obs_space[key], key)
     return obs
 
   def _check(self, value, space, key):
     if not isinstance(value, (
-        np.ndarray, np.generic, list, tuple, int, float, bool)):
+        np.ndarray, np.generic, list, tuple, int, float, bool, str)):
       raise TypeError(f'Invalid type {type(value)} for key {key}.')
     if value in space:
       return
@@ -296,7 +297,7 @@ class ResizeImage(Wrapper):
     self._size = size
     self._keys = [
         k for k, v in env.obs_space.items()
-        if len(v.shape) > 1 and v.shape[:2] != size]
+        if len(v.shape) > 2 and v.shape[:2] != size]
     print(f'Resizing keys {",".join(self._keys)} to {self._size}.')
     if self._keys:
       from PIL import Image
@@ -417,3 +418,33 @@ class RestartOnException(Wrapper):
       self.env = self._ctor()
       action['reset'] = np.ones_like(action['reset'])
       return self.env.step(action)
+
+
+class PadImage(Wrapper):
+
+  def __init__(self, env, size=(64, 64)):
+    super().__init__(env)
+    self._size = size
+    self._keys = [
+        k for k, v in env.obs_space.items()
+        if len(v.shape) > 2 and v.shape[:2] != size]
+    print(f'Resizing keys {",".join(self._keys)} to {self._size}.')
+
+  @functools.cached_property
+  def obs_space(self):
+    spaces = self.env.obs_space
+    for key in self._keys:
+      shape = self._size + spaces[key].shape[2:]
+      spaces[key] = elements.Space(np.uint8, shape)
+    return spaces
+
+  def step(self, action):
+    obs = self.env.step(action)
+    for key in self._keys:
+      obs[key] = self._resize(obs[key])
+    return obs
+
+  def _resize(self, image):
+    new = np.zeros((*self._size, image.shape[-1]))
+    new[:image.shape[0], :image.shape[1]] = image
+    return new

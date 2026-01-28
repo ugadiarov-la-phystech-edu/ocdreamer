@@ -11,6 +11,7 @@ import numpy as np
 import optax
 
 from . import ssm
+from embodied import make_image
 
 f32 = jnp.float32
 i32 = jnp.int32
@@ -232,7 +233,6 @@ class Agent(embodied.jax.Agent):
     if self.config.contdisc:
       con *= 1 - 1 / self.config.horizon
     losses['con'] = self.con(self.feat2tensor(repfeat), 2, training=training).loss(con)
-
     for key, recon in recons.items():
       space, value = self.obs_space[key], obs[key]
       #assert value.dtype == space.dtype, (key, space, value.dtype)
@@ -372,6 +372,29 @@ class Agent(embodied.jax.Agent):
       pred = jnp.clip(pred * 255, 0, 255).astype(jnp.uint8)
       error = ((i32(pred) - i32(true) + 255) / 2).astype(np.uint8)
       video = jnp.concatenate([true, pred, error], 2)
+
+      def batch_make_image(batch_np):
+        # Ensure NumPy inputs to avoid JAX ops inside callback.
+        batch_np = np.asarray(batch_np)
+        # batch_np shape: (B, T, H, W, C)
+        B, T = batch_np.shape[0], batch_np.shape[1]
+        results = []
+        for b in range(B):
+          for t in range(T):
+            img = batch_np[b, t]
+            rgb_img = make_image(img)
+            results.append(rgb_img)
+        results = np.stack(results, axis=0)
+        results = results.reshape(B, T, *results.shape[1:])
+        return results
+      #print(video.shape)
+      if video.shape[-1]==17:
+        B, T = video.shape[0], video.shape[1]
+        # Определяем форму и тип результата
+        result_shape = (B,T, 256, 256, 3)
+        result_spec = jax.ShapeDtypeStruct(result_shape, jnp.uint8)
+        video=jax.pure_callback(batch_make_image, result_spec, video)
+      #print(video.shape)
 
       video = jnp.pad(video, [[0, 0], [0, 0], [2, 2], [2, 2], [0, 0]])
       mask = jnp.zeros(video.shape, bool).at[:, :, 2:-2, 2:-2, :].set(True)
