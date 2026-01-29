@@ -516,12 +516,13 @@ class ObjectCentricTSSM(TSSM):
  
   slot_key: str = 'slot'
 
-  def __init__(self, act_space, obs_space, **kw):
+
+  def __init__(self, act_space, obs_space, action_as_slot=False, **kw):
     super().__init__(act_space, obs_space, **kw)
     assert 'slot' in self.obs_space
     self.num_slots = self.obs_space['slot'].shape[0]
     self.slotkeys = [k for k, s in obs_space.items() if k == self.slot_key]
-    
+    self.action_as_slot = action_as_slot
 
   @property
   def entry_space(self):
@@ -566,13 +567,20 @@ class ObjectCentricTSSM(TSSM):
 
   def _core(self, deter, stoch, action, is_last, training, text_embeds=None):
     assert stoch.shape[:2] == is_last.shape[:2], (stoch.shape, is_last.shape)
+    assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings"
     stoch = stoch.reshape((*stoch.shape[:-2], -1))
     x = self.sub('dynin', nn.Linear, self.deter)(stoch)
     action /= sg(jnp.maximum(1, jnp.abs(action)))
-    action_embedding = self.sub('actin', nn.Linear, self.deter)(action)
-
-    # process an action as a slot
-    x = jnp.concatenate([x, jnp.expand_dims(action_embedding, -2)], -2)
+    if self.action_as_slot:
+      action_embedding = self.sub('actin', nn.Linear, self.deter)(action)
+      # process an action as a slot
+      x = jnp.concatenate([x, jnp.expand_dims(action_embedding, -2)], -2)
+    else:
+      #we can change action shape but we doesnt do it right now
+      #action_embedding = self.sub('actin', nn.Linear, text_embeds[-1])(action)
+      action_embedding = action
+      # Concatenate action with text embeddings
+      text_embeds = jnp.concatenate([text_embeds, action_embedding], axis=-1)
     mask = self._causal_mask(is_last)
     episode_step_idx = self._enumerate_steps(is_last)
 
@@ -587,8 +595,9 @@ class ObjectCentricTSSM(TSSM):
     assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings"
     deter = self.sub('object_centric_dynamics', ObjectCentricDynamics, **init_kw)(x, mask=mask, ts=episode_step_idx,
                                                                             training=training, text_embeds=text_embeds)
-    # cut off action-slot
-    deter = deter[..., :-1, :]
+    # cut off action-slot only if we appended it
+    if self.action_as_slot:
+      deter = deter[..., :-1, :]
 
     return deter
 
