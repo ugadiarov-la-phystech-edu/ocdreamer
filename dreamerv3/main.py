@@ -6,7 +6,7 @@ from functools import partial as bind
 
 from omegaconf import OmegaConf
 
-from embodied.core.logger import CometOutput
+from embodied.core.logger import CometOutput, JSONLOutput
 from embodied.core.wrappers import BatchSlotExtractorEnv, BatchEnv
 
 folder = pathlib.Path(__file__).parent
@@ -162,9 +162,9 @@ def make_logger(config):
   outputs.append(elements.logger.TerminalOutput(config.logger.filter, 'Agent'))
   for output in config.logger.outputs:
     if output == 'jsonl':
-      outputs.append(elements.logger.JSONLOutput(logdir, 'metrics.jsonl'))
-      outputs.append(elements.logger.JSONLOutput(
-          logdir, 'scores.jsonl', 'episode/score'))
+      outputs.append(JSONLOutput(logdir, 'metrics.jsonl'))
+      outputs.append(JSONLOutput(
+          logdir, 'scores.jsonl', 'episode/score', log_multivalue=True))
     elif output == 'tensorboard':
       outputs.append(elements.logger.TensorBoardOutput(
           logdir, config.logger.fps))
