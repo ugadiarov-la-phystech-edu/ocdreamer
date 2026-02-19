@@ -39,6 +39,7 @@ defaults:
     shapes2d:
       resize: {size: [64, 64]}
       timelimit: {duration: 100}
+    cw: {size: [64, 64], timelimit: {duration: 100}, use_seed: True}
 
   replay:
     size: 5e6
