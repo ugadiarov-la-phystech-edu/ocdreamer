@@ -64,8 +64,7 @@ class ManiSkillEnv(gym.Env):
 	def step(self, action):
 		obs, r, terminated, truncated, info = self._unravel(self.env.step(action))
 		info = {k: v.item() for k, v in info.items()}
-		info["success"] = int(info.get("success", 0))
-		return self._process_observation(obs), r, False, False, info
+		return self._process_observation(obs), r, terminated, truncated, info
 
 	def render(self, *args, **kwargs):
 		return self.last_observation.copy()

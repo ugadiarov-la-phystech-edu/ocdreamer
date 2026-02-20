@@ -43,6 +43,7 @@ class FromGym(embodied.Env):
         'is_first': elements.Space(bool),
         'is_last': elements.Space(bool),
         'is_terminal': elements.Space(bool),
+		'log/success': elements.Space(bool),
     }
 
   @functools.cached_property
@@ -74,13 +75,15 @@ class FromGym(embodied.Env):
     else:
       obs, reward, terminated, truncated, self._info = self._env.step(action)
       self._done = terminated or truncated
+    is_success = bool(self._info.get('success', False))
     return self._obs(
         obs, reward,
         is_last=bool(self._done),
-        is_terminal=terminated)
+        is_terminal=terminated,
+        is_success=is_success,)
 
   def _obs(
-      self, obs, reward, is_first=False, is_last=False, is_terminal=False):
+      self, obs, reward, is_first=False, is_last=False, is_terminal=False, is_success=False):
     if not self._obs_dict:
       obs = {self._obs_key: obs}
     obs = self._flatten(obs)
@@ -90,6 +93,7 @@ class FromGym(embodied.Env):
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal)
+    obs["log/success"] = is_success
     return obs
 
   def render(self):

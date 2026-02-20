@@ -45,10 +45,10 @@ def train(make_agent, make_replay, make_batch_env, make_stream, make_logger, arg
         episode.add(key + '/sum', value, agg='sum')
     if tran['is_last']:
       result = episode.result()
-      logger.add({
-          'score': result.pop('score'),
-          'length': result.pop('length'),
-      }, prefix='episode')
+      result_metrics = {'score': result.pop('score'), 'length': result.pop('length')}
+      if 'log/success' in tran:
+        result_metrics['success'] = int(tran['log/success'])
+      logger.add(result_metrics, prefix='episode')
       rew = result.pop('rewards')
       if len(rew) > 1:
         result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()

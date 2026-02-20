@@ -47,6 +47,7 @@ class ReachingHard(gym.Env):
 
 	def step(self, action):
 		observation, reward, done, info = self._env.step(action)
+		info['success'] = info.get('success', False)
 		return observation, reward, done, False, info
 
 
