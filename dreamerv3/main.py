@@ -310,7 +310,7 @@ def wrap_env(env, config, **kwargs):
 
 def make_batch_env(config, args):
   env_fn = [bind(make_env, config, i) for i in range(args.envs)]
-  parallel = not args.debug
+  parallel = args.parallel and not args.debug
   if config.agent.batch_env.use_slot_extractor:
     config_slot_extractor = config.agent.batch_env.batch_slot_extractor_env.slot_extractor
     typ = config_slot_extractor.typ

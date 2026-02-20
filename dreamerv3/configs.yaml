@@ -61,6 +61,7 @@ defaults:
     envs: 16
     eval_envs: 4
     eval_eps: 1
+    parallel: True
     report_batches: 1
     from_checkpoint: ''
     episode_timeout: 180
