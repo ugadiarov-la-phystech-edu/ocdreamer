@@ -28,7 +28,7 @@ class ReachingHard(gym.Env):
 		config_path = os.path.join(os.path.dirname(__file__), 'config', 'cw_reaching-hard.yaml')
 		env_config = OmegaConf.load(config_path)
 
-		# time_limit will be enforced in wrapper
+		# time limit will be enforced in wrapper
 		env_config['time_limit'] = timelimit['duration'] + 1
 		env_config['obs_size'] = size[0]
 		self._env = CwTargetEnv(env_config, seed)

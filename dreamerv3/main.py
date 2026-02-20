@@ -232,6 +232,9 @@ def make_env(config, index, **overrides):
   elif suite == 'cw':
     from embodied.envs import from_gym
     import embodied.envs.cw_envs
+  elif suite == 'robosuite':
+    from embodied.envs import from_gym
+    import embodied.envs.robosuite_env
 
   ctor = {
       'customdummyslot': 'embodied.envs.dummy:CustomDummySlot',
@@ -254,6 +257,7 @@ def make_env(config, index, **overrides):
           f'MemoryMaze-{task}-v0', **kw),
       'shapes2d': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False),
 	  'cw': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False, **kw),
+	  'robosuite': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False, **kw),
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
