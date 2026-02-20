@@ -73,7 +73,7 @@ class RobosuiteEnv(gym.Env):
 	metadata = {"render.modes": ["rgb_array"]}
 
 	def __init__(self, task, timelimit, size, seed):
-		assert task in ROBOSUITE_TASKS.keys(), f'Expected tasks={list(ROBOSUITE_TASKS.keys())}. Actual task={cfg.task}'
+		assert task in ROBOSUITE_TASKS.keys(), f'Expected tasks={list(ROBOSUITE_TASKS.keys())}. Actual task={task}'
 		self._robot = 'Panda'
 		task_cfg = ROBOSUITE_TASKS[task]
 		self._task = task_cfg['env']

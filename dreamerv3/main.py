@@ -235,6 +235,9 @@ def make_env(config, index, **overrides):
   elif suite == 'robosuite':
     from embodied.envs import from_gym
     import embodied.envs.robosuite_env
+  elif suite == 'maniskill3':
+    from embodied.envs import from_gym
+    import embodied.envs.maniskill3
 
   ctor = {
       'customdummyslot': 'embodied.envs.dummy:CustomDummySlot',
@@ -258,6 +261,7 @@ def make_env(config, index, **overrides):
       'shapes2d': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False),
 	  'cw': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False, **kw),
 	  'robosuite': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False, **kw),
+	  'maniskill3': lambda task, **kw: from_gym.FromGym(task, old_gym_interface=False, **kw),
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')

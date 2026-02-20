@@ -41,6 +41,7 @@ defaults:
       timelimit: {duration: 100}
     cw: {size: [64, 64], timelimit: {duration: 100}, use_seed: True}
     robosuite: {size: [96, 96], timelimit: {duration: 125}, use_seed: True}
+    maniskill3: {size: [64, 64], timelimit: {duration: 100}, use_seed: True}
 
   replay:
     size: 5e6
