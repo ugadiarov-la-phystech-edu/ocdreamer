@@ -51,6 +51,10 @@ class TimeLimit(Wrapper):
         return obs
     self._step += 1
     obs = self.env.step(action)
+    is_last = obs['is_last']
+    is_terminal = obs['is_terminal']
+    if is_last and not is_terminal:
+      raise ValueError(f'time limit must be applied in {type(self)}, but got is_last={is_last}, is_terminal={is_terminal}')
     if self._duration and self._step >= self._duration:
       obs['is_last'] = True
     self._done = obs['is_last']
