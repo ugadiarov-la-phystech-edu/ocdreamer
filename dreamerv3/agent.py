@@ -94,7 +94,7 @@ class Agent(embodied.jax.Agent):
     scales.update({k: rec for k in self.dec.slotkeys if k not in scales})
     scales.update({k: rec for k in self.dec.veckeys if k not in scales})
     scales.update({k: rec for k in self.dec.imgkeys if k not in scales})
-    if not self.config.repval_loss:
+    if not self.config.repval_loss and 'repval' in scales:
       del scales['repval']
 
     self.scales = scales

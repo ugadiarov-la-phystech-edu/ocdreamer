@@ -731,6 +731,7 @@ class Decoder(nj.Module):
       self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
     self.kw = kw
     self.vec_dist = kw.pop('vec_dist', None)
+    self.img_dist = kw.pop('img_dist', None)
   
     if len(self.slotkeys) > 0:
       assert len(self.slotkeys) == 1, f'{self.slotkeys}'
@@ -825,12 +826,22 @@ class Decoder(nj.Module):
         x = x.repeat(2, -2).repeat(2, -3)
         kw = dict(**self.kw, outscale=self.outscale)
         x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
-      x = jax.nn.sigmoid(x)
+      if self.img_dist == 'mse':
+        x = jax.nn.sigmoid(x)
+      elif self.img_dist == 'binary':
+        pass
+      else:
+        raise NotImplementedError(self.img_dist)
       x = x.reshape((*bshape, *x.shape[1:]))
       split = np.cumsum(
           [self.obs_space[k].shape[-1] for k in self.imgkeys][:-1])
       for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
-        out = embodied.jax.outs.MSE(out)
+        if self.img_dist == 'mse':
+          out = embodied.jax.outs.MSE(out)
+        elif self.img_dist == 'binary':
+          out = embodied.jax.outs.Binary(out)
+        else:
+          raise NotImplementedError(self.img_dist)
         out = embodied.jax.outs.Agg(out, 3, jnp.sum)
         recons[k] = out
 

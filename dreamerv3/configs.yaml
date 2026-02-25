@@ -102,7 +102,7 @@ defaults:
       simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
     dec:
       typ: simple
-      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', vec_dist: symlog_mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
+      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', vec_dist: symlog_mse, img_dist: mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
     rewhead:
       typ: mlp
       mlp: { layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255 }
@@ -235,9 +235,10 @@ homegrid:
   agent.value.layers: 5
 
 messenger:
-  task: messenger_si
+  task: messenger_s1
   run.envs: 16
-  env.messenger.length: 4
+  run.eval_envs: 16
+  env.messenger.length: 64
   agent.enc.simple.vec_keys: token_embed
   agent.enc.simple.img_keys: image
   #agent.enc.simple.depth: 96
@@ -247,19 +248,29 @@ messenger:
   run.train_ratio: 64
   batch_size: 16
   batch_length: 256 
-  # replay.size: 1e6
-  # agent.dyn.tssm.deter: 4096
-  # agent.dyn.tssm.classes: 32
-  # agent.rewhead.layers: 5
-  # agent.conhead.layers: 5
-  # agent.policy.layers: 5
-  # agent.value.layers: 5 
-  # agent.enc.simple.mults: [2, 3]
-  # agent.enc.simple.layers: 5
-  # agent.dec.simple.mults: [2, 3]
-  # agent.dec.simple.layers: 5
-  # run.steps: 1e6
+  replay.size: 1e6
+  run.steps: 1e6
+  agent.dec.simple.img_dist: binary
 
+dynalang:
+  agent.dyn.typ: rssm
+  #replay.online: False
+  agent.dyn.rssm.deter: 4096
+  agent.dyn.rssm.classes: 32
+  agent.rewhead.mlp.layers: 5
+  agent.conhead.mlp.layers: 5
+  agent.policy.mlp.layers: 5
+  agent.value.mlp.layers: 5
+  agent.enc.simple.mults: [2, 3]
+  agent.enc.simple.layers: 5
+  agent.dec.simple.mults: [2, 3]
+  agent.dec.simple.layers: 5
+  agent.dyn.rssm.imglayers: 1
+  agent.loss_scales.dyn: 0.5
+  agent.loss_scales.repval: 0.0
+  agent.contdisc: False
+  agent.repval_loss: False
+  agent.policy_dist_disc: onehot
 
 multicpu:
   batch_size: 12
