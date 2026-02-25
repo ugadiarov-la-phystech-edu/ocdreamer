@@ -90,7 +90,10 @@ defaults:
 
   agent:
     loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3, lm: 0.0}
-    opt: {lr: 4e-5, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.0, schedule: const, warmup: 1000, anneal: 0}
+    #opt: {lr: 4e-5, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.0, schedule: const, warmup: 1000, anneal: 0}
+    opt_model: {opt: adam, lr: 1e-4, eps: 1e-8, clip: 1000.0, wd: 0.0, warmup: 0, lateclip: 0.0}
+    opt_policy: {opt: adam, lr: 3e-5, eps: 1e-5, clip: 100.0, wd: 0.0, warmup: 0, lateclip: 0.0}
+    opt_value: {opt: adam, lr: 3e-5, eps: 1e-5, clip: 100.0, wd: 0.0, warmup: 0, lateclip: 0.0}
     ac_grads: False
     dyn:
       typ: rssm
@@ -250,7 +253,9 @@ messenger:
   batch_length: 256 
   replay.size: 1e6
   run.steps: 1e6
-  agent.dec.simple.img_dist: binary
+  agent.enc.simple.mults: [2, 3]
+  agent.dec.simple.mults: [2, 3]
+  #agent.dec.simple.img_dist: binary
 
 dynalang:
   agent.dyn.typ: rssm

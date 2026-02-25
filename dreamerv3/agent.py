@@ -74,15 +74,17 @@ class Agent(embodied.jax.Agent):
     self.valnorm = embodied.jax.Normalize(**config.valnorm, name='valnorm')
     self.advnorm = embodied.jax.Normalize(**config.advnorm, name='advnorm')
 
-    opt_modules = [self.dyn, self.dec, self.rew, self.con, self.pol, self.val]
-    self.modules = opt_modules + [self.enc]
+    self.model_modules = [self.dyn, self.dec, self.rew, self.con]
     if config.dyn.typ != 'octssm':
         # an encoder returns slots as is
-        opt_modules.append(self.enc)
+        self.model_modules.append(self.enc)
 
-    self.opt = embodied.jax.Optimizer(
-        opt_modules, self._make_opt(**config.opt), summary_depth=1,
-        name='opt')
+    self.model_opt = embodied.jax.Optimizer(
+        self.model_modules, self._make_opt(**config.opt_model), summary_depth=1, name='model_opt')
+    self.policy_opt = embodied.jax.Optimizer(
+        [self.pol], self._make_opt(**config.opt_policy), summary_depth=1, name='policy_opt')
+    self.value_opt = embodied.jax.Optimizer(
+        [self.val], self._make_opt(**config.opt_value), summary_depth=1, name='value_opt')
 
     scales = self.config.loss_scales.copy()
     rec = scales.pop('rec')
@@ -190,9 +192,21 @@ class Agent(embodied.jax.Agent):
 
   def train(self, carry, data):
     carry, obs, prevact, is_last, stepid = self._apply_replay_context(carry, data)
-    metrics, (carry, entries, outs, mets) = self.opt(
-        self.loss, carry, obs, prevact, is_last, training=True, has_aux=True)
+    # Train model
+    model_metrics, (carry, entries, outs, mets) = self.model_opt(
+        self.model_loss, carry, obs, prevact, is_last, training=True, has_aux=True)
+    metrics = model_metrics.copy()
     metrics.update(mets)
+    # Train policy
+    policy_metrics, (carry, p_entries, outs, policy_mets) = self.policy_opt(
+      self.policy_loss, carry, obs, prevact, is_last, outs, training=True, has_aux=True)
+    metrics.update(policy_metrics)
+    metrics.update(policy_mets)
+    # Train value
+    value_metrics, (carry, v_entries, outs, value_mets) = self.value_opt(
+      self.value_loss, carry, obs, prevact, is_last, outs, training=True, has_aux=True)
+    metrics.update(value_metrics)
+    metrics.update(value_mets)
     self.slowval.update()
     outs = {}
     if self.config.replay_context:
@@ -208,7 +222,165 @@ class Agent(embodied.jax.Agent):
              {'is_last': data['is_last'][:, -1].astype(is_last['is_last'].dtype)})
     return carry, outs, metrics
 
+  def model_loss(self, carry, obs, prevact, is_last, training):
+    """Model loss: trains encoder, dynamics, decoder, reward, and continuation heads."""
+    enc_carry, dyn_carry, dec_carry = carry
+    reset = obs['is_first']
+    B, T = reset.shape
+    losses = {}
+    metrics = {}
+
+    # World model
+    enc_carry, enc_entries, tokens = self.enc(enc_carry, obs, reset, training)
+    text_embeds = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds = tokens[self.enc.veckeys[0]]
+      assert text_embeds is not None, 'ObjectCentricTSSM requires text embeddings'
+    dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
+        dyn_carry, tokens, prevact, is_last, reset, training, text_embeds=text_embeds)
+    losses.update(los)
+    metrics.update(mets)
+
+    dec_carry, dec_entries, recons = self.dec(dec_carry, repfeat, reset, training)
+    inp = self.feat2tensor(repfeat)
+    losses['rew'] = self.rew(inp, 2, training=training).loss(obs['reward'])
+    con = f32(~obs['is_terminal'])
+    if self.config.contdisc:
+      con *= 1 - 1 / self.config.horizon
+    losses['con'] = self.con(inp, 2, training=training).loss(con)
+    # Reconstruction losses
+    for key, recon in recons.items():
+      space, value = self.obs_space[key], obs[key]
+      target = f32(value) / 255 if isimage(space) else value
+      target = jax.nn.one_hot(target, self.obs_space[key].high) if key == 'token' else target
+      losses[key] = recon.loss(sg(target))
+    if 'lm' in self.scales.keys():
+      print("Adding LM loss")
+      next_ac = prevact[:, :-1].reshape((-1, 1, *prevact.shape[2:]))
+      context = {'feat': repfeat[:, :-1].reshape((-1, *repfeat.shape[2:]))}
+      one_step = self.dec(self.dyn.imagine(next_ac, context, False))
+      truth = obs['token'][:, 1:].reshape((-1, 1, *obs['token'].shape[2:]))
+      nll = -(one_step["token"].log_prob(truth)).mean(-1)
+      losses['lm'] = (nll * self.scales["lm"]).mean()
+
+    loss = sum([v.mean() * self.scales[k] for k, v in losses.items()])
+    metrics.update({f'loss/{k}': v.mean() for k, v in losses.items()})
+
+    carry = (enc_carry, dyn_carry, dec_carry)
+    entries = (enc_entries, dyn_entries, dec_entries)
+    outs = {'tokens': tokens, 'repfeat': repfeat, 'losses': losses, 'dyn_entries': dyn_entries, 'dyn_carry': dyn_carry}
+    return loss, (carry, entries, outs, metrics)
+
+  def policy_loss(self, carry, obs, prevact, is_last, outs, training):
+    """Policy loss: trains the policy network."""
+    enc_carry, dyn_carry, dec_carry = carry
+    repfeat = outs['repfeat']
+    dyn_entries = outs['dyn_entries']
+    reset = obs['is_first']
+    B, T = reset.shape
+    losses = {}
+    metrics = {}
+
+    # Imagination
+    K = min(self.config.imag_last or T, T)
+    H = self.config.imag_length
+    text_embeds = None
+    if self.config.dyn.typ == 'octssm':
+      text_embeds = outs['tokens'][self.enc.veckeys[0]]
+    starts = self.dyn.starts(dyn_entries, dyn_carry, prevact, K, text_embeds=text_embeds)
+    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1, training=training))
+    _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training=False)    
+    first = jax.tree.map(
+        lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
+    imgfeat = concat([sg(first), sg(imgfeat)], 1)
+    lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
+    lastact = jax.tree.map(lambda x: x[:, None], lastact)
+    imgact = concat([imgprevact, lastact], 1)
+    assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
+    assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
+
+    inp = self.feat2tensor(imgfeat)
+    los, imgloss_out, mets = imag_loss(
+        imgact,
+        self.rew(inp, 2, training=False).pred(),
+        self.con(inp, 2, training=False).prob(1),
+        self.pol(inp, 2, training=training),
+        self.val(inp, 2, training=False),
+        self.slowval(inp, 2, training=False),
+        self.retnorm, self.valnorm, self.advnorm,
+        update=training,
+        contdisc=self.config.contdisc,
+        horizon=self.config.horizon,
+        **self.config.imag_loss)
+    losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items() if k == 'policy'})
+    metrics.update(mets)
+
+    loss = sum([v.mean() * self.scales[k] for k, v in losses.items()])
+    metrics.update({f'loss/{k}': v.mean() for k, v in losses.items()})
+
+    outs['imgloss_out'] = imgloss_out
+    outs['imgfeat'] = imgfeat
+    outs['imgact'] = imgact
+    outs['inp_imag'] = inp
+    outs['con_imag'] = self.con(inp, 2, training=False).prob(1)  # Store continuation for value_loss
+    return loss, (carry, {}, outs, metrics)
+
+  def value_loss(self, carry, obs, prevact, is_last, outs, training):
+    """Value loss: trains the value network."""
+    repfeat = outs['repfeat']
+    reset = obs['is_first']
+    B, T = reset.shape
+    losses = {}
+    metrics = {}
+
+    K = min(self.config.imag_last or T, T)
+    imgloss_out = outs['imgloss_out']
+    inp_imag = outs['inp_imag']
+    con_imag = outs['con_imag']
+    ret = imgloss_out['ret']
+    
+    val = self.val(inp_imag, 2, training=training)
+    voffset, vscale = self.valnorm.stats()
+    
+    con = f32(con_imag)
+    disc = 1 if self.config.contdisc else 1 - 1 / self.config.horizon
+    weight = jnp.cumprod(disc * con, 1) / disc
+    
+    tar_normed = (ret - voffset) / vscale
+    tar_padded = jnp.concatenate([tar_normed, 0 * tar_normed[:, -1:]], 1)
+    slowval = self.slowval(inp_imag, 2, training=False)
+    slowreg = self.config.imag_loss.get('slowreg', 1.0)
+    value_loss = sg(weight[:, :-1]) * (
+        val.loss(sg(tar_padded)) +
+        slowreg * val.loss(sg(slowval.pred())))[:, :-1]
+    losses['value'] = value_loss.mean(1).reshape((B, K))
+
+    # Replay value loss
+    if self.config.repval_loss:
+      feat = sg(repfeat, skip=self.config.repval_grad)
+      last, term, rew = [obs[k] for k in ('is_last', 'is_terminal', 'reward')]
+      boot = imgloss_out['ret'][:, 0].reshape(B, K)
+      feat, last, term, rew, boot = jax.tree.map(
+          lambda x: x[:, -K:], (feat, last, term, rew, boot))
+      inp = self.feat2tensor(feat)
+      los, reploss_out, mets = repl_loss(
+          last, term, rew, boot,
+          self.val(inp, 2, training=training),
+          self.slowval(inp, 2, training=False),
+          self.valnorm,
+          update=training,
+          horizon=self.config.horizon,
+          **self.config.repl_loss)
+      losses.update(los)
+      metrics.update(prefix(mets, 'reploss'))
+
+    loss = sum([v.mean() * self.scales.get(k, 1.0) for k, v in losses.items()])
+    metrics.update({f'loss/{k}': v.mean() for k, v in losses.items()})
+
+    return loss, (carry, {}, outs, metrics)
+
   def loss(self, carry, obs, prevact, is_last, training):
+    """Deprecated: Kept for compatibility"""
     enc_carry, dyn_carry, dec_carry = carry
     reset = obs['is_first']
     B, T = reset.shape
@@ -444,41 +616,32 @@ class Agent(embodied.jax.Agent):
 
   def _make_opt(
       self,
-      lr: float = 4e-5,
-      agc: float = 0.3,
-      eps: float = 1e-20,
-      beta1: float = 0.9,
-      beta2: float = 0.999,
-      momentum: bool = True,
-      nesterov: bool = False,
+      lr: float = 1e-4,
+      opt: str = 'adam',
+      eps: float = 1e-8,
+      clip: float = 1000.0,
       wd: float = 0.0,
-      wdregex: str = r'/kernel$',
-      schedule: str = 'const',
-      warmup: int = 1000,
-      anneal: int = 0,
+      warmup: int = 0,
+      lateclip: float = 0.0,
+      **kwargs
   ):
+  
     chain = []
-    chain.append(embodied.jax.opt.clip_by_agc(agc))
-    chain.append(embodied.jax.opt.scale_by_rms(beta2, eps))
-    chain.append(embodied.jax.opt.scale_by_momentum(beta1, nesterov))
-    if wd:
-      assert not wdregex[0].isnumeric(), wdregex
-      pattern = re.compile(wdregex)
-      wdmask = lambda params: {k: bool(pattern.search(k)) for k in params}
-      chain.append(optax.add_decayed_weights(wd, wdmask))
-    assert anneal > 0 or schedule == 'const'
-    if schedule == 'const':
-      sched = optax.constant_schedule(lr)
-    elif schedule == 'linear':
-      sched = optax.linear_schedule(lr, 0.1 * lr, anneal - warmup)
-    elif schedule == 'cosine':
-      sched = optax.cosine_decay_schedule(lr, anneal - warmup, 0.1 * lr)
+    if clip:
+      chain.append(optax.clip_by_global_norm(clip))
+    if opt == 'adam':
+      chain.append(optax.adam(learning_rate=lr, eps=eps))
+    elif opt == 'lion':
+      chain.append(optax.lion(learning_rate=lr))
     else:
-      raise NotImplementedError(schedule)
+      raise NotImplementedError(opt)
+    if lateclip:
+      chain.append(embodied.jax.opt.late_grad_clip(lateclip))
+    if wd:
+      chain.append(optax.add_decayed_weights(wd))
     if warmup:
-      ramp = optax.linear_schedule(0.0, lr, warmup)
-      sched = optax.join_schedules([ramp, sched], [warmup])
-    chain.append(optax.scale_by_learning_rate(sched))
+      schedule = optax.linear_schedule(0.0, lr, warmup)
+      chain.append(optax.inject_hyperparams(optax.scale)(schedule))
     return optax.chain(*chain)
   
   def preprocess(self, obs):
