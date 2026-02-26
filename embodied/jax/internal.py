@@ -243,24 +243,26 @@ def mesh(devices, shape, names):
 
 
 def grouped_ckpt_fns(params, chunksize):
+  nbytes = lambda x: sum(getattr(v, 'nbytes', 0) for v in jax.tree.leaves(x))
   if chunksize <= 0:
     groups = [list(params.keys())]
   else:
     groups = []
     keys, size = [], 0
     for k, v in params.items():
-      if size + v.nbytes <= chunksize:
+      vsize = nbytes(v)
+      if size + vsize <= chunksize:
         keys.append(k)
-        size += v.nbytes
+        size += vsize
       else:
         groups.append(keys)
-        keys, size = [k], v.nbytes
+        keys, size = [k], vsize
     keys and groups.append(keys)
   assert sum(len(keys) for keys in groups) == len(params)
   assert all(len(keys) for keys in groups)
   msg = f'Compiling {len(groups)} checkpoint groups...'
   elements.print(msg, color='yellow')
-  maxsize = max(sum(params[k].nbytes for k in g) for g in groups)
+  maxsize = max(sum(nbytes(params[k]) for k in g) for g in groups)
   print(f'Largest checkpoint group: {maxsize / (1024 ** 3):.0f} GB')
 
   gather_fns, shard_fns = [], []
@@ -277,14 +279,20 @@ def grouped_ckpt_fns(params, chunksize):
 
 
 def ckpt_fn(params, compile=True):
-  mesh = params[list(params.keys())[0]].sharding.mesh
+  first = jax.tree.leaves(params[list(params.keys())[0]])[0]
+  mesh = first.sharding.mesh
   mirrored = jax.sharding.NamedSharding(mesh, P())
   struct = lambda x, s: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=s)
   keys = params.keys()
-  original = {k: params[k].sharding for k in keys}
-  inspec = {k: struct(params[k], original[k]) for k in keys}
+  original = {k: jax.tree.map(lambda x: x.sharding, params[k]) for k in keys}
+  mirror_spec = {k: jax.tree.map(lambda _: mirrored, params[k]) for k in keys}
+  inspec = {
+      k: jax.tree.map(struct, params[k], original[k])
+      for k in keys}
   gather_fn = jax.jit(lambda x: x, (original,), mirrored).lower(inspec)
-  inspec = {k: struct(params[k], mirrored) for k in keys}
+  inspec = {
+      k: jax.tree.map(struct, params[k], mirror_spec[k])
+      for k in keys}
   shard_fn = jax.jit(lambda x: x, (mirrored,), original).lower(inspec)
   if compile:
     gather_fn = gather_fn.compile()

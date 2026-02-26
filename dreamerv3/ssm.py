@@ -7,8 +7,9 @@ import embodied.jax
 import embodied.jax.nets as nn
 import jax
 import jax.numpy as jnp
-import ninjax as nj
 import numpy as np
+
+from . import ninjax_old as nj
 
 f32 = jnp.float32
 i32 = jnp.int32
@@ -154,13 +155,13 @@ class AbstractSSM(nj.Module):
   def _logit(self, name, feat, n_layers):
     x = feat
     for i in range(n_layers):
-      x = self.sub(f'{name}_logit{i}', nn.Linear, self.hidden, **self.kw)(x)
-      x = nn.act(self.act)(self.sub(f'{name}_logit{i}norm', nn.Norm, self.norm)(x))
+      x = self.get(f'{name}_logit{i}', nn.Linear, self.hidden, **self.kw)(x)
+      x = nn.act(self.act)(self.get(f'{name}_logit{i}norm', nn.Norm, self.norm)(x))
     return self._stoch_logit(f'{name}_stochlogit', x)
 
   def _stoch_logit(self, name, x):
     kw = dict(**self.kw, outscale=self.outscale)
-    x = self.sub(name, nn.Linear, self.stoch * self.classes, **kw)(x)
+    x = self.get(name, nn.Linear, self.stoch * self.classes, **kw)(x)
     return x.reshape(x.shape[:-1] + (self.stoch, self.classes))
 
   def _dist(self, logits):
@@ -215,10 +216,15 @@ class RSSM(AbstractSSM):
       return jax.tree.map(lambda x: x[:, None], carry), entry, feat
     else:
       unroll = jax.tree.leaves(tokens)[0].shape[1] if self.unroll else 1
+      scan_inputs = jax.tree.map(
+        lambda x: jnp.swapaxes(x, 0, 1),
+        (tokens, action, reset))
       carry, (entries, feat) = nj.scan(
           lambda carry, inputs: self._observe(
               carry, *inputs, training),
-          carry, (tokens, action, reset), unroll=unroll, axis=1)
+        carry, scan_inputs, unroll=unroll)
+      entries, feat = jax.tree.map(
+        lambda x: jnp.swapaxes(x, 0, 1), (entries, feat))
       return carry, entries, feat
 
   def _observe(self, carry, tokens, action, reset, training):
@@ -232,7 +238,7 @@ class RSSM(AbstractSSM):
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     post_logit = self._logit('obslogit', x, self.obslayers)
-    post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
+    post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.rng()))
     carry = dict(deter=deter, stoch=post_stoch)
     feat = dict(deter=deter, stoch=post_stoch, logit=post_logit)
     entry = dict(deter=deter, stoch=post_stoch)
@@ -245,7 +251,7 @@ class RSSM(AbstractSSM):
       actemb = nn.DictConcat(self.act_space, 1)(action)
       deter = self._core(carry['deter'], carry['stoch'], actemb, None, training)
       prior_logit = self._logit('imglogit', deter, self.imglayers)
-      prior_stoch = nn.cast(self._dist(prior_logit).sample(seed=nj.seed()))
+      prior_stoch = nn.cast(self._dist(prior_logit).sample(seed=nj.rng()))
       carry = nn.cast(dict(deter=deter, stoch=prior_stoch))
       feat = nn.cast(dict(deter=deter, stoch=prior_stoch, logit=prior_logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, prior_stoch, prior_logit))
@@ -253,13 +259,17 @@ class RSSM(AbstractSSM):
     else:
       unroll = length if self.unroll else 1
       if callable(policy):
+        steps = jnp.arange(length, dtype=i32)
         carry, (feat, action) = nj.scan(
             lambda c, _: self.imagine(c, policy, 1, training, single=True),
-            nn.cast(carry), (), length, unroll=unroll, axis=1)
+            nn.cast(carry), steps, unroll=unroll)
       else:
+        policy = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), nn.cast(policy))
         carry, (feat, action) = nj.scan(
             lambda c, a: self.imagine(c, a, 1, training, single=True),
-            nn.cast(carry), nn.cast(policy), length, unroll=unroll, axis=1)
+            nn.cast(carry), policy, unroll=unroll)
+      feat, action = jax.tree.map(
+          lambda x: jnp.swapaxes(x, 0, 1), (feat, action))
       # We can also return all carry entries but it might be expensive.
       # entries = dict(deter=feat['deter'], stoch=feat['stoch'])
       # return carry, entries, feat, action
@@ -271,18 +281,18 @@ class RSSM(AbstractSSM):
     g = self.blocks
     flat2group = lambda x: einops.rearrange(x, '... (g h) -> ... g h', g=g)
     group2flat = lambda x: einops.rearrange(x, '... g h -> ... (g h)', g=g)
-    x0 = self.sub('dynin0', nn.Linear, self.hidden, **self.kw)(deter)
-    x0 = nn.act(self.act)(self.sub('dynin0norm', nn.Norm, self.norm)(x0))
-    x1 = self.sub('dynin1', nn.Linear, self.hidden, **self.kw)(stoch)
-    x1 = nn.act(self.act)(self.sub('dynin1norm', nn.Norm, self.norm)(x1))
-    x2 = self.sub('dynin2', nn.Linear, self.hidden, **self.kw)(action)
-    x2 = nn.act(self.act)(self.sub('dynin2norm', nn.Norm, self.norm)(x2))
+    x0 = self.get('dynin0', nn.Linear, self.hidden, **self.kw)(deter)
+    x0 = nn.act(self.act)(self.get('dynin0norm', nn.Norm, self.norm)(x0))
+    x1 = self.get('dynin1', nn.Linear, self.hidden, **self.kw)(stoch)
+    x1 = nn.act(self.act)(self.get('dynin1norm', nn.Norm, self.norm)(x1))
+    x2 = self.get('dynin2', nn.Linear, self.hidden, **self.kw)(action)
+    x2 = nn.act(self.act)(self.get('dynin2norm', nn.Norm, self.norm)(x2))
     x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)
     x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
     for i in range(self.dynlayers):
-      x = self.sub(f'dynhid{i}', nn.BlockLinear, self.deter, g, **self.kw)(x)
-      x = nn.act(self.act)(self.sub(f'dynhid{i}norm', nn.Norm, self.norm)(x))
-    x = self.sub('dyngru', nn.BlockLinear, 3 * self.deter, g, **self.kw)(x)
+      x = self.get(f'dynhid{i}', nn.BlockLinear, self.deter, g, **self.kw)(x)
+      x = nn.act(self.act)(self.get(f'dynhid{i}norm', nn.Norm, self.norm)(x))
+    x = self.get('dyngru', nn.BlockLinear, 3 * self.deter, g, **self.kw)(x)
     gates = jnp.split(flat2group(x), 3, -1)
     reset, cand, update = [group2flat(x) for x in gates]
     reset = jax.nn.sigmoid(reset)
@@ -385,7 +395,7 @@ class TSSM(AbstractSSM):
     carry, tokens, action, is_last = nn.cast((carry, tokens, action, is_last['is_last']))
     action = nn.DictConcat(self.act_space, len(action['action'].shape) - 1)(action)
     post_logit = self._logit('obslogit', tokens, self.obslayers)
-    post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
+    post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.rng()))
     mask_last_steps = lambda x: x * (1 - jnp.expand_dims(is_last, range(len(is_last.shape), len(x.shape))))
     action = jax.tree.map(mask_last_steps, action)
 
@@ -427,7 +437,7 @@ class TSSM(AbstractSSM):
         current_text_embed = text_context
       deter = self._core(None, state_context['stoch'], actemb, is_last, training, text_embeds=current_text_embed)
       current_prior_logit = self._logit('imglogit', deter[:, -1], self.imglayers)
-      current_prior_stoch = nn.cast(self._dist(current_prior_logit).sample(seed=nj.seed()))
+      current_prior_stoch = nn.cast(self._dist(current_prior_logit).sample(seed=nj.rng()))
       state_context['deter'] = deter
       state_context['stoch'] = prepend(state_context['stoch'][:, 1:], current_prior_stoch[:, None])
       is_last = prepend(is_last[:, 1:], jnp.zeros_like(is_last[:, :1]))
@@ -443,13 +453,17 @@ class TSSM(AbstractSSM):
     else:
       unroll = length if self.unroll else 1
       if callable(policy):
+        steps = jnp.arange(length, dtype=i32)
         carry, (feat, action) = nj.scan(
             lambda c, _: self.imagine(c, policy, 1, training, single=True),
-            nn.cast(carry), (), length, unroll=unroll, axis=1)
+            nn.cast(carry), steps, unroll=unroll)
       else:
+        policy = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), nn.cast(policy))
         carry, (feat, action) = nj.scan(
             lambda c, a: self.imagine(c, a, 1, training, single=True),
-            nn.cast(carry), nn.cast(policy), length, unroll=unroll, axis=1)
+            nn.cast(carry), policy, unroll=unroll)
+      feat, action = jax.tree.map(
+          lambda x: jnp.swapaxes(x, 0, 1), (feat, action))
       # We can also return all carry entries but it might be expensive.
       # entries = dict(deter=feat['deter'], stoch=feat['stoch'])
       # return carry, entries, feat, action
@@ -461,7 +475,7 @@ class TSSM(AbstractSSM):
     stoch = stoch.reshape((*stoch.shape[:2], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     x = jnp.concatenate([stoch, action], -1)
-    x = self.sub('dynin', nn.Linear, self.deter)(x)
+    x = self.get('dynin', nn.Linear, self.deter)(x)
     mask = self._causal_mask(is_last)
     episode_step_idx = self._enumerate_steps(is_last)
 
@@ -473,7 +487,7 @@ class TSSM(AbstractSSM):
         'concatenate_over_layers': self.transformer_concatenate_over_layers,
         'normalize_out': self.transformer_normalize_out, 'dropout': self.transformer_dropout,
     }
-    deter = self.sub('transformer', Transformer, **transformer_init_kwargs)(x, mask=mask, ts=episode_step_idx,
+    deter = self.get('transformer', Transformer, **transformer_init_kwargs)(x, mask=mask, ts=episode_step_idx,
                                                                             training=training, text_embeds=text_embeds)
 
     return deter
@@ -569,15 +583,14 @@ class ObjectCentricTSSM(TSSM):
     assert stoch.shape[:2] == is_last.shape[:2], (stoch.shape, is_last.shape)
     assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings"
     stoch = stoch.reshape((*stoch.shape[:-2], -1))
-    x = self.sub('dynin', nn.Linear, self.deter)(stoch)
+    x = self.get('dynin', nn.Linear, self.deter)(stoch)
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     if self.action_as_slot:
-      action_embedding = self.sub('actin', nn.Linear, self.deter)(action)
+      action_embedding = self.get('actin', nn.Linear, self.deter)(action)
       # process an action as a slot
       x = jnp.concatenate([x, jnp.expand_dims(action_embedding, -2)], -2)
     else:
       #we can change action shape but we doesnt do it right now
-      #action_embedding = self.sub('actin', nn.Linear, text_embeds[-1])(action)
       action_embedding = action
       # Concatenate action with text embeddings
       text_embeds = jnp.concatenate([text_embeds, action_embedding], axis=-1)
@@ -593,7 +606,7 @@ class ObjectCentricTSSM(TSSM):
         'position_embedding': self.transformer_position_embedding,
     }
     assert text_embeds is not None, "ObjectCentricTSSM requires text embeddings"
-    deter = self.sub('object_centric_dynamics', ObjectCentricDynamics, **init_kw)(x, mask=mask, ts=episode_step_idx,
+    deter = self.get('object_centric_dynamics', ObjectCentricDynamics, **init_kw)(x, mask=mask, ts=episode_step_idx,
                                                                             training=training, text_embeds=text_embeds)
     # cut off action-slot only if we appended it
     if self.action_as_slot:
@@ -658,10 +671,6 @@ class Encoder(nj.Module):
       squish = nn.symlog if self.symlog else lambda x: x
       x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
       x = x.reshape((-1, *x.shape[bdims:]))
-      # x = nn.cast(x)  # ensure compute dtype
-      # for i in range(self.layers):
-      #   x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
-      #   x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
       assert len(self.veckeys)==1, "Expected only token or token_embed as vector input"
       for k in self.veckeys:  
         outs[k] = x
@@ -674,14 +683,14 @@ class Encoder(nj.Module):
       x = x.reshape((-1, *x.shape[bdims:]))
       for i, depth in enumerate(self.depths):
         if self.outer and i == 0:
-          x = self.sub(f'cnn{i}', nn.Conv2D, depth, K, **self.kw)(x)
+          x = self.get(f'cnn{i}', nn.Conv2D, depth, K, **self.kw)(x)
         elif self.strided:
-          x = self.sub(f'cnn{i}', nn.Conv2D, depth, K, 2, **self.kw)(x)
+          x = self.get(f'cnn{i}', nn.Conv2D, depth, K, 2, **self.kw)(x)
         else:
-          x = self.sub(f'cnn{i}', nn.Conv2D, depth, K, **self.kw)(x)
+          x = self.get(f'cnn{i}', nn.Conv2D, depth, K, **self.kw)(x)
           B, H, W, C = x.shape
           x = x.reshape((B, H // 2, 2, W // 2, 2, C)).max((2, 4))
-        x = nn.act(self.act)(self.sub(f'cnn{i}norm', nn.Norm, self.norm)(x))
+        x = nn.act(self.act)(self.get(f'cnn{i}norm', nn.Norm, self.norm)(x))
       assert 3 <= x.shape[-3] <= 16, x.shape
       assert 3 <= x.shape[-2] <= 16, x.shape
       x = x.reshape((x.shape[0], -1))
@@ -765,10 +774,10 @@ class Decoder(nj.Module):
       spaces = {k: self.obs_space[k].shape[-1:] for k in self.slotkeys}
       outputs = {k: 'symlog_mse' if self.symlog else 'mse' for k, v in spaces.items()}
       kw = dict(**self.kw, act=self.act, norm=self.norm)
-      x = self.sub('mlp_slots', nn.MLP, self.layers, self.units, **kw)(inp)
+      x = self.get('mlp_slots', nn.MLP, self.layers, self.units, **kw)(inp)
       x = x.reshape((*bshape, *x.shape[1:]))
       kw = dict(**self.kw, outscale=self.outscale)
-      outs = self.sub('slot', embodied.jax.DictHead, spaces, outputs, **kw)(x)
+      outs = self.get('slot', embodied.jax.DictHead, spaces, outputs, **kw)(x)
       outs = {k: embodied.jax.outs.Agg(v, 1, jnp.sum) for k, v in outs.items()}
       recons.update(outs)
     bshape = bshape[:-1] if self.slotkeys else bshape
@@ -779,10 +788,10 @@ class Decoder(nj.Module):
       spaces = {k: self.obs_space[k] for k in self.veckeys}
       outputs = {k: self.vec_dist for k in spaces.keys()}
       kw = dict(**self.kw, act=self.act, norm=self.norm)
-      x = self.sub('mlp_vec', nn.MLP, self.layers, self.units, **kw)(inp)
+      x = self.get('mlp_vec', nn.MLP, self.layers, self.units, **kw)(inp)
       x = x.reshape((*bshape, *x.shape[1:]))
       kw = dict(**self.kw, outscale=self.outscale)
-      outs = self.sub('vec', embodied.jax.DictHead, spaces, outputs, **kw)(x)
+      outs = self.get('vec', embodied.jax.DictHead, spaces, outputs, **kw)(x)
       recons.update(outs)
 
     if self.imgkeys:
@@ -797,35 +806,35 @@ class Decoder(nj.Module):
         x1 = x1.reshape((*x1.shape[:-2], -1))
         x0 = x0.reshape((-1, x0.shape[-1]))
         x1 = x1.reshape((-1, x1.shape[-1]))
-        x0 = self.sub('sp0', nn.BlockLinear, u, g, **self.kw)(x0)
+        x0 = self.get('sp0', nn.BlockLinear, u, g, **self.kw)(x0)
         x0 = einops.rearrange(
             x0, '... (g h w c) -> ... h w (g c)',
             h=minres[0], w=minres[1], g=g)
-        x1 = self.sub('sp1', nn.Linear, 2 * self.units, **self.kw)(x1)
-        x1 = nn.act(self.act)(self.sub('sp1norm', nn.Norm, self.norm)(x1))
-        x1 = self.sub('sp2', nn.Linear, shape, **self.kw)(x1)
-        x = nn.act(self.act)(self.sub('spnorm', nn.Norm, self.norm)(x0 + x1))
+        x1 = self.get('sp1', nn.Linear, 2 * self.units, **self.kw)(x1)
+        x1 = nn.act(self.act)(self.get('sp1norm', nn.Norm, self.norm)(x1))
+        x1 = self.get('sp2', nn.Linear, shape, **self.kw)(x1)
+        x = nn.act(self.act)(self.get('spnorm', nn.Norm, self.norm)(x0 + x1))
       else:
-        x = self.sub('space', nn.Linear, shape, **kw)(inp)
-        x = nn.act(self.act)(self.sub('spacenorm', nn.Norm, self.norm)(x))
+        x = self.get('space', nn.Linear, shape, **kw)(inp)
+        x = nn.act(self.act)(self.get('spacenorm', nn.Norm, self.norm)(x))
       for i, depth in reversed(list(enumerate(self.depths[:-1]))):
         if self.strided:
           kw = dict(**self.kw, transp=True)
-          x = self.sub(f'conv{i}', nn.Conv2D, depth, K, 2, **kw)(x)
+          x = self.get(f'conv{i}', nn.Conv2D, depth, K, 2, **kw)(x)
         else:
           x = x.repeat(2, -2).repeat(2, -3)
-          x = self.sub(f'conv{i}', nn.Conv2D, depth, K, **self.kw)(x)
-        x = nn.act(self.act)(self.sub(f'conv{i}norm', nn.Norm, self.norm)(x))
+          x = self.get(f'conv{i}', nn.Conv2D, depth, K, **self.kw)(x)
+        x = nn.act(self.act)(self.get(f'conv{i}norm', nn.Norm, self.norm)(x))
       if self.outer:
         kw = dict(**self.kw, outscale=self.outscale)
-        x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
+        x = self.get('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
       elif self.strided:
         kw = dict(**self.kw, outscale=self.outscale, transp=True)
-        x = self.sub('imgout', nn.Conv2D, self.imgdep, K, 2, **kw)(x)
+        x = self.get('imgout', nn.Conv2D, self.imgdep, K, 2, **kw)(x)
       else:
         x = x.repeat(2, -2).repeat(2, -3)
         kw = dict(**self.kw, outscale=self.outscale)
-        x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
+        x = self.get('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
       if self.img_dist == 'mse':
         x = jax.nn.sigmoid(x)
       elif self.img_dist == 'binary':

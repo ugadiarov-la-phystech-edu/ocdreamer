@@ -6,8 +6,8 @@ import einops
 import jax
 import jax.ad_checkpoint as adc
 import jax.numpy as jnp
-import ninjax as nj
 import numpy as np
+from dreamerv3 import ninjax_old as nj
 
 COMPUTE_DTYPE = jnp.bfloat16
 LAYER_CALLBACK = lambda tensor, name: tensor
@@ -52,7 +52,7 @@ def init(name):
 def dropout(x, prob, training):
   if not prob or not training:
     return x
-  keep = jax.random.bernoulli(nj.seed(), 1.0 - prob, x.shape)
+  keep = jax.random.bernoulli(nj.rng(), 1.0 - prob, x.shape)
   return x * keep / (1.0 - prob)
 
 
@@ -161,15 +161,15 @@ class Initializer:
       x = jnp.zeros(shape, dtype)
     elif self.dist == 'uniform':
       limit = np.sqrt(1 / fan)
-      x = jax.random.uniform(nj.seed(), shape, dtype, -limit, limit)
+      x = jax.random.uniform(nj.rng(), shape, dtype, -limit, limit)
     elif self.dist == 'normal':
-      x = jax.random.normal(nj.seed(), shape)
+      x = jax.random.normal(nj.rng(), shape)
       x *= np.sqrt(1 / fan)
     elif self.dist == 'trunc_normal':
-      x = jax.random.truncated_normal(nj.seed(), -2, 2, shape)
+      x = jax.random.truncated_normal(nj.rng(), -2, 2, shape)
       x *= 1.1368 * np.sqrt(1 / fan)
     elif self.dist == 'normed':
-      x = jax.random.uniform(nj.seed(), shape, dtype, -1, 1)
+      x = jax.random.uniform(nj.rng(), shape, dtype, -1, 1)
       x *= (1 / jnp.linalg.norm(x.reshape((-1, shape[-1])), 2, 0))
     else:
       raise NotImplementedError(self.dist)
@@ -181,6 +181,8 @@ class Initializer:
     return f'Initializer({self.dist}, {self.fan}, {self.scale})'
 
   def __eq__(self, other):
+    if not isinstance(other, Initializer):
+      return NotImplemented
     attributes = ('dist', 'fan', 'scale')
     return all(getattr(self, k) == getattr(other, k) for k in attributes)
 
@@ -215,7 +217,7 @@ class Embed(nj.Module):
     K = self.classes
     D = self.units
     shape = (*self.shape, self.classes, self.units)
-    table = self.value('table', init(self.einit), shape)
+    table = self.get('table', init(self.einit), shape)
     table = table.reshape(N, K, D)
     table = table.astype(COMPUTE_DTYPE)
     index = x.reshape(-1, N)
@@ -241,9 +243,9 @@ class Linear(nj.Module):
     ensure_dtypes(x)
     size = math.prod(self.units)
     shape = (x.shape[-1], size)
-    x = x @ self.value('kernel', self._scaled_winit, shape).astype(x.dtype)
+    x = x @ self.get('kernel', self._scaled_winit, shape).astype(x.dtype)
     if self.bias:
-      x += self.value('bias', init(self.binit), size).astype(x.dtype)
+      x += self.get('bias', init(self.binit), size).astype(x.dtype)
     x = x.reshape((*x.shape[:-1], *self.units))
     return x
 
@@ -269,12 +271,12 @@ class BlockLinear(nj.Module):
     assert x.shape[-1] % self.blocks == 0, (x.shape, self.blocks)
     insize = x.shape[-1]
     shape = (self.blocks, insize // self.blocks, self.units // self.blocks)
-    kernel = self.value('kernel', self._scaled_winit, shape).astype(x.dtype)
+    kernel = self.get('kernel', self._scaled_winit, shape).astype(x.dtype)
     x = x.reshape((*x.shape[:-1], self.blocks, insize // self.blocks))
     x = jnp.einsum('...ki,kio->...ko', x, kernel)
     x = x.reshape((*x.shape[:-2], self.units))
     if self.bias:
-      x += self.value('bias', init(self.binit), self.units).astype(x.dtype)
+      x += self.get('bias', init(self.binit), self.units).astype(x.dtype)
     return x
 
   def _scaled_winit(self, *args, **kwargs):
@@ -299,7 +301,7 @@ class Conv2D(nj.Module):
   def __call__(self, x):
     ensure_dtypes(x)
     shape = (*self.kernel, x.shape[-1] // self.groups, self.depth)
-    kernel = self.value('kernel', self._scaled_winit, shape).astype(x.dtype)
+    kernel = self.get('kernel', self._scaled_winit, shape).astype(x.dtype)
     if self.transp:
       assert self.pad == 'same', self.pad
       # Manual implementation of fractionally strided convolution because the
@@ -316,7 +318,7 @@ class Conv2D(nj.Module):
         feature_group_count=self.groups,
         dimension_numbers=('NHWC', 'HWIO', 'NHWC'))
     if self.bias:
-      x += self.value('bias', init(self.binit), self.depth).astype(x.dtype)
+      x += self.get('bias', init(self.binit), self.depth).astype(x.dtype)
     return x
 
   def _scaled_winit(self, *args, **kwargs):
@@ -342,19 +344,19 @@ class Conv3D(nj.Module):
     if self.transp:
       assert self.groups == 1, self.groups
       shape = (*self.kernel, x.shape[-1], self.depth)
-      kernel = self.value('kernel', init(self.winit), shape).astype(x.dtype)
+      kernel = self.get('kernel', init(self.winit), shape).astype(x.dtype)
       x = jax.lax.conv_transpose(
           x, kernel, self.stride, self.pad.upper(),
           dimension_numbers=('NTHWC', 'THWIO', 'NTHWC'))
     else:
       shape = (*self.kernel, x.shape[-1] // self.groups, self.depth)
-      kernel = self.value('kernel', init(self.winit), shape).astype(x.dtype)
+      kernel = self.get('kernel', init(self.winit), shape).astype(x.dtype)
       x = jax.lax.conv_general_dilated(
           x, kernel, self.stride, self.pad.upper(),
           feature_group_count=self.groups,
           dimension_numbers=('NTHWC', 'THWIO', 'NTHWC'))
     if self.bias:
-      x += self.value('bias', init(self.binit), self.depth).astype(x.dtype)
+      x += self.get('bias', init(self.binit), self.depth).astype(x.dtype)
     return x
 
 
@@ -401,12 +403,12 @@ class Norm(nj.Module):
   def _scale(self, shape, dtype):
     if not self.scale:
       return jnp.ones(shape, dtype)
-    return self.value('scale', jnp.ones, shape, f32).astype(dtype)
+    return self.get('scale', jnp.ones, shape, f32).astype(dtype)
 
   def _shift(self, shape, dtype):
     if not self.shift:
       return jnp.zeros(shape, dtype)
-    return self.value('shift', jnp.zeros, shape, f32).astype(dtype)
+    return self.get('shift', jnp.zeros, shape, f32).astype(dtype)
 
 
 class Attention(nj.Module):
@@ -428,19 +430,19 @@ class Attention(nj.Module):
     assert self.heads % kv_heads == 0
     head_ratio = self.heads // kv_heads
     if head_ratio == 1:
-      qkv = self.sub('qkv', Linear, 3 * D, **kw)(x)
+      qkv = self.get('qkv', Linear, 3 * D, **kw)(x)
       q, k, v = jnp.split(qkv, 3, -1)
     else:
-      q = self.sub('q', Linear, D, **kw)(x)
-      k = self.sub('k', Linear, D // head_ratio, **kw)(x)
-      v = self.sub('v', Linear, D // head_ratio, **kw)(x)
+      q = self.get('q', Linear, D, **kw)(x)
+      k = self.get('k', Linear, D // head_ratio, **kw)(x)
+      v = self.get('v', Linear, D // head_ratio, **kw)(x)
     q = einops.rearrange(q, 'b t (h d) -> b t h d', h=self.heads)
     k = einops.rearrange(k, 'b t (h d) -> b t h d', h=kv_heads)
     v = einops.rearrange(v, 'b t (h d) -> b t h d', h=kv_heads)
 
     if self.qknorm != 'none':
-      q = self.sub('normq', Norm, self.qknorm)(q)
-      k = self.sub('normk', Norm, self.qknorm)(k)
+      q = self.get('normq', Norm, self.qknorm)(q)
+      k = self.get('normk', Norm, self.qknorm)(k)
 
     if self.rope:
       q = rope(q, ts)
@@ -460,7 +462,7 @@ class Attention(nj.Module):
     weights = dropout(weights, self.dropout, training)
     x = einops.einsum(weights, v, 'b h g tq tk, b tk h d -> b tq h g d')
     x = einops.rearrange(x, 'b t h g d -> b t (h g d)')
-    x = self.sub('proj', Linear, D, **kw, outscale=self.outscale)(x)
+    x = self.get('proj', Linear, D, **kw, outscale=self.outscale)(x)
     return x
 
 
@@ -488,17 +490,17 @@ class CrossAttention(Attention):
     kv_heads = self.kv_heads or self.heads
     assert self.heads % kv_heads == 0
     head_ratio = self.heads // kv_heads
-    q = self.sub('to_q', Linear, D_q, **kw)(slots)
-    k = self.sub('to_k', Linear, D_q // head_ratio, **kw)(feats)
-    v = self.sub('to_v', Linear, D_q // head_ratio, **kw)(feats)
+    q = self.get('to_q', Linear, D_q, **kw)(slots)
+    k = self.get('to_k', Linear, D_q // head_ratio, **kw)(feats)
+    v = self.get('to_v', Linear, D_q // head_ratio, **kw)(feats)
     
     q = einops.rearrange(q, 'b t (h d) -> b t h d', h=self.heads)
     k = einops.rearrange(k, 'b t (h d) -> b t h d', h=kv_heads)
     v = einops.rearrange(v, 'b t (h d) -> b t h d', h=kv_heads)
 
     if self.qknorm != 'none':
-      q = self.sub('normq', Norm, self.qknorm)(q)
-      k = self.sub('normk', Norm, self.qknorm)(k)
+      q = self.get('normq', Norm, self.qknorm)(q)
+      k = self.get('normk', Norm, self.qknorm)(k)
 
     if self.rope:
       q = rope(q, ts)
@@ -516,7 +518,7 @@ class CrossAttention(Attention):
     weights = dropout(weights, self.dropout, training)
     x = einops.einsum(weights, v, 'b h g tq tk, b tk h d -> b tq h g d')
     x = einops.rearrange(x, 'b t h g d -> b t (h g d)')
-    x = self.sub('proj', Linear, D_q, **kw, outscale=self.outscale)(x)
+    x = self.get('proj', Linear, D_q, **kw, outscale=self.outscale)(x)
     return x
 
 
@@ -577,7 +579,7 @@ class DictEmbed(nj.Module):
     assert isinstance(bshape, tuple), bshape
     assert all(k in xs for k in self.spaces), (self.spaces, xs.keys())
     ys = []
-    init = self.value('init', self.einit, (self.units,))
+    init = self.get('init', self.einit, (self.units,))
     init = jnp.broadcast_to(init, (*bshape, self.units))
     init = COMPUTE_DTYPE(init)
     ys.append(init)
@@ -594,21 +596,21 @@ class DictEmbed(nj.Module):
           classes = int(np.asarray(space.classes).max())
           assert classes <= 256, (key, space, classes)
           if self.impl == 'lookup':
-            x = self.sub(
+            x = self.get(
                 key, Embed, classes, self.units, space.shape,
                 combine=True, **self.ekw)(x)
             # x = x.reshape((*x.shape[:len(bshape)], -1))
           elif self.impl == 'onehot':
             x = jax.nn.one_hot(x, classes, dtype=COMPUTE_DTYPE)
             x = x.reshape((*x.shape[:len(bshape)], -1))
-            x = self.sub(key, Linear, self.units, **self.lkw)(x)
+            x = self.get(key, Linear, self.units, **self.lkw)(x)
           else:
             raise NotImplementedError(self.impl)
         else:
           x = self.squish(x)
           x = x.astype(COMPUTE_DTYPE)
           x = x.reshape((*x.shape[:len(bshape)], -1))
-          x = self.sub(key, Linear, self.units, **self.lkw)(x)
+          x = self.get(key, Linear, self.units, **self.lkw)(x)
         x = mask(x, m)
         ys.append(x)
       except Exception:
@@ -636,8 +638,8 @@ class MLP(nj.Module):
     x = x.astype(COMPUTE_DTYPE)
     x = x.reshape([-1, x.shape[-1]])
     for i in range(self.layers):
-      x = self.sub(f'linear{i}', Linear, self.units, **self.kw)(x)
-      x = self.sub(f'norm{i}', Norm, self.norm)(x)
+      x = self.get(f'linear{i}', Linear, self.units, **self.kw)(x)
+      x = self.get(f'norm{i}', Norm, self.norm)(x)
       x = act(self.act)(x)
     x = x.reshape((*shape, x.shape[-1]))
     return x
@@ -673,13 +675,13 @@ class Transformer(nj.Module):
     if self.aggregation:
       # use a learnable token to aggregate information over input
       aggregation_token_kw = {'winit': self.winit, 'outscale': self.outscale, 'shape': (1, x.shape[-1]), 'dtype': x.dtype,}
-      aggregation_token = self.sub('aggregation_token', Learnable, **aggregation_token_kw)()
+      aggregation_token = self.get('aggregation_token', Learnable, **aggregation_token_kw)()
       aggregation_token = jnp.repeat(aggregation_token[None], B, axis=0)
       x = jnp.concatenate([x, aggregation_token], axis=1)
 
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
-        x = self.sub('transformer_layer', TransformerLayer, **init_kw)(x, mask, ts, text_embeds, training)
+        x = self.get('transformer_layer', TransformerLayer, **init_kw)(x, mask, ts, text_embeds, training)
         out.append(x)
 
     if self.concatenate_over_layers:
@@ -687,7 +689,7 @@ class Transformer(nj.Module):
       x = x.reshape((x.shape[0], x.shape[1], -1))
 
     if self.normalize_out:
-      x = self.sub('outnorm', Norm, self.norm)(x)
+      x = self.get('outnorm', Norm, self.norm)(x)
 
     if self.aggregation:
       return x[:, -1]
@@ -724,8 +726,8 @@ class GRU(nj.Module):
     kw = dict(bias=self.bias, winit=self.winit, binit=self.binit)
     carry = mask(carry, ~reset)
     x = jnp.concatenate([carry, inp], -1)
-    x = self.sub('norm', Norm, self.norm)(x)
-    x = self.sub('linear', Linear, 3 * self.units, **kw)(x)
+    x = self.get('norm', Norm, self.norm)(x)
+    x = self.get('linear', Linear, 3 * self.units, **kw)(x)
     res, cand, update = jnp.split(x, 3, -1)
     cand = jnp.tanh(jax.nn.sigmoid(res) * cand)
     update = jax.nn.sigmoid(update + self.update_bias)
@@ -759,26 +761,26 @@ class TransformerLayer(nj.Module):
       text_embeds = text_embeds.astype(COMPUTE_DTYPE) #change from float32 to bfloat16
     assert D == self.units, (D, self.units)
     skip = x
-    x = self.sub('norm1', Norm, self.norm)(x)
-    x = self.sub('mha', Attention, **kw, **ak)(x, mask, ts, training)
+    x = self.get('norm1', Norm, self.norm)(x)
+    x = self.get('mha', Attention, **kw, **ak)(x, mask, ts, training)
     x += skip
     if self.use_cross_attention:
       skip = x
-      x = self.sub('norm_cross', Norm, self.norm)(x)
-      cross_attn = self.sub('cross_attn', CrossAttention, **kw, **ak)
+      x = self.get('norm_cross', Norm, self.norm)(x)
+      cross_attn = self.get('cross_attn', CrossAttention, **kw, **ak)
       x = cross_attn(x, text_embeds, mask=mask, ts=ts, training=training)
       x += skip
     skip = x
-    x = self.sub('norm2', Norm, self.norm)(x)
+    x = self.get('norm2', Norm, self.norm)(x)
     if self.glu:
       U = max(D, int((D * self.ffup * 2 / 3) // 32 * 32))
-      ff1 = self.sub('ff1', Linear, U, **kw)
-      ff2 = self.sub('ff2', Linear, U, **kw)
-      ff3 = self.sub('ff3', Linear, D, **kw, outscale=self.outscale)
+      ff1 = self.get('ff1', Linear, U, **kw)
+      ff2 = self.get('ff2', Linear, U, **kw)
+      ff3 = self.get('ff3', Linear, D, **kw, outscale=self.outscale)
       x = ff3(act(self.act)(ff1(x)) * ff2(x))
     else:
-      ff1 = self.sub('ff1', Linear, D * self.ffup, **kw)
-      ff2 = self.sub('ff2', Linear, D, **kw, outscale=self.outscale)
+      ff1 = self.get('ff1', Linear, D * self.ffup, **kw)
+      ff2 = self.get('ff2', Linear, D, **kw, outscale=self.outscale)
       x = ff2(act(self.act)(ff1(x)))
 
     x += skip
@@ -811,14 +813,14 @@ class ObjectCentricDynamicsLayer(nj.Module):
     text_embeds = text_embeds.reshape(B * T, *text_embeds.shape[2:])
     text_embeds = text_embeds[:, None, :]
     text_embeds = jnp.repeat(text_embeds, num_slots, axis=1)
-    x = self.sub('object_encoder_block', TransformerLayer, **kw)(x, mask=None, ts=None, training=training, text_embeds=text_embeds)
+    x = self.get('object_encoder_block', TransformerLayer, **kw)(x, mask=None, ts=None, training=training, text_embeds=text_embeds)
     x = x.reshape(B, T, num_slots, slot_dim)
     text_embeds = text_embeds.reshape(B, T, num_slots, -1)
 
     x = jnp.swapaxes(x, 1, 2).reshape(B * num_slots, T, slot_dim)
     text_embeds = jnp.swapaxes(text_embeds, 1, 2).reshape(B * num_slots, T, -1)
     mask = jnp.repeat(mask, num_slots, axis=0) if mask is not None else None
-    x = self.sub('time_encoder_block', TransformerLayer, **kw)(x, mask, ts=None, text_embeds=text_embeds, training=training)
+    x = self.get('time_encoder_block', TransformerLayer, **kw)(x, mask, ts=None, text_embeds=text_embeds, training=training)
     x = jnp.swapaxes(x.reshape(B, num_slots, T, slot_dim), 1, 2)
 
     return x
@@ -873,13 +875,13 @@ class ObjectCentricDynamics(nj.Module):
     kw = {k: getattr(self, k) for k in ('units', 'heads', 'ffup', 'act', 'norm', 'glu', 'qknorm', 'bias', 'winit', 'binit', 'outscale', 'dropout')}
     for i in range(self.layers):
       with nj.scope(f'layer{i}'):
-        x = self.sub('object_centric_dynamics_layer', ObjectCentricDynamicsLayer, **kw)(x, mask, ts, text_embeds, training)
+        x = self.get('object_centric_dynamics_layer', ObjectCentricDynamicsLayer, **kw)(x, mask, ts, text_embeds, training)
 
     if self.residual:
       x = x + input_x
 
     if self.normalize_out:
-      x = self.sub('outnorm', Norm, self.norm)(x)
+      x = self.get('outnorm', Norm, self.norm)(x)
 
     return x
 
@@ -894,7 +896,7 @@ class Learnable(nj.Module):
     self.dtype = dtype
 
   def __call__(self):
-    return self.value('learnable', self._scaled_winit, self.shape).astype(self.dtype)
+    return self.get('learnable', self._scaled_winit, self.shape).astype(self.dtype)
 
   def _scaled_winit(self, *args, **kwargs):
     return init(self.winit)(*args, **kwargs) * self.outscale

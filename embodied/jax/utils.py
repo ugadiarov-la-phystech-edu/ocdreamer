@@ -2,7 +2,7 @@ import functools
 
 import jax
 import jax.numpy as jnp
-import ninjax as nj
+from dreamerv3 import ninjax_old as nj
 
 from . import internal
 
@@ -114,17 +114,35 @@ class SlowModel:
     self._initonce()
     mix = jnp.where(self.count.read() % self.every == 0, self.rate, 0)
     fn = lambda src, dst: mix * src + (1 - mix) * dst
-    values = jax.tree.map(fn, self.source.values, self.model.values)
-    [self.model.write(k, v) for k, v in values.items()]
+    source_prefix = self.source.path + '/'
+    model_prefix = self.model.path + '/'
+    source_values = {
+        key[len(source_prefix):]: value
+        for key, value in self.source.getm(allow_empty=True).items()}
+    model_values = {
+        key[len(model_prefix):]: value
+        for key, value in self.model.getm(allow_empty=True).items()}
+    values = jax.tree.map(fn, source_values, model_values)
+    [self.model.put(k, v) for k, v in values.items()]
     self.count.write(self.count.read() + 1)
 
   def _initonce(self, *args, method=None, **kwargs):
-    assert self.source.values, 'no parameters to track'
-    if not self.model.values:
-      p = self.model.path + '/'
-      nj.context().update({p + k: v for k, v in self.source.values.items()})
-    assert self.model.values.keys() == self.source.values.keys(), (
-        self.model.values.keys(), self.source.values.keys())
+    source_prefix = self.source.path + '/'
+    model_prefix = self.model.path + '/'
+    source_values = {
+        key[len(source_prefix):]: value
+        for key, value in self.source.getm(allow_empty=True).items()}
+    model_values = {
+        key[len(model_prefix):]: value
+        for key, value in self.model.getm(allow_empty=True).items()}
+    assert source_values, 'no parameters to track'
+    if not model_values:
+      [self.model.put(k, v) for k, v in source_values.items()]
+      model_values = {
+          key[len(model_prefix):]: value
+          for key, value in self.model.getm(allow_empty=True).items()}
+    assert model_values.keys() == source_values.keys(), (
+        model_values.keys(), source_values.keys())
 
 
 class LayerScan:
@@ -154,9 +172,8 @@ def layer_scan(fn, scope, count, inp, *args, **kwargs):
   args_ = jax.tree.map(lambda x: x[0], args)  # Copy structure
   kwargs_ = jax.tree.map(lambda x: x, kwargs)  # Copy structure
   state_ = {k: v[0] if isinner(k) else v for k, v in nj.context().items()}
-  state, _, accessed, modified, created = fn(
-      state_, inp, *args_, ignore=True, track=True,
-      seed=nj.seed(None, True), **kwargs_)
+  (discarded, accessed, modified, created), state = fn(
+      state_, nj.rng(), inp, *args_, ignore=True, track=True, **kwargs_)
 
   # print('-' * 79)
   # print('accessed:', accessed)
@@ -205,7 +222,7 @@ def layer_scan(fn, scope, count, inp, *args, **kwargs):
     state = {
         **unchanging_inner, **unchanging_outer,
         **changing_inner, **changing_outer}
-    state, out = fn(state, inp, *arg, **kwargs, seed=seed)
+    out, state = fn(state, seed, inp, *arg, **kwargs)
     out, *other = out if isinstance(out, tuple) else (out,)
     changing = {k: v for k, v in state.items() if k in modified}
     changing_inner = inner(changing)
@@ -216,7 +233,7 @@ def layer_scan(fn, scope, count, inp, *args, **kwargs):
     y = (other, creations_inner, changing_inner)
     return carry, y
 
-  seeds = nj.seed(count, True)
+  seeds = nj.rng(count)
   carry, ys = jax.lax.scan(
       f=body,
       init=(inp, changing_outer),

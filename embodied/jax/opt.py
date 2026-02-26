@@ -2,8 +2,8 @@ import math
 
 import jax
 import jax.numpy as jnp
-import ninjax as nj
 import optax
+from dreamerv3 import ninjax_old as nj
 
 from . import internal
 from . import nets
@@ -57,7 +57,7 @@ class Optimizer(nj.Module):
       invscale = 1 / self.grad_scale.read()
       grads = jax.tree.map(lambda x: x * invscale, grads)
 
-    state = self.sub('state', nj.Tree, self.opt.init, params)
+    state = self.get('state', nj.Variable, self.opt.init, params)
     updates, new_state = self.opt.update(grads, state.read(), params)
     nj.context().update(optax.apply_updates(params, updates))
     state.write(new_state)
@@ -75,7 +75,7 @@ class Optimizer(nj.Module):
     metrics['grad_norm'] = grad_norm
     metrics['grad_rms'] = nets.rms(grads)
     metrics['update_rms'] = nets.rms(updates)
-    metrics['param_rms'] = nets.rms([x.values for x in self.modules])
+    metrics['param_rms'] = nets.rms([x.getm(allow_empty=True) for x in self.modules])
     metrics['param_count'] = jnp.array(list(counts.values()), f32).sum()
     metrics = {f'{self.name}/{k}': v for k, v in metrics.items()}
     return (metrics, aux) if has_aux else metrics

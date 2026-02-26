@@ -4,8 +4,8 @@ from typing import Callable
 import elements
 import jax
 import jax.numpy as jnp
-import ninjax as nj
 import numpy as np
+from dreamerv3 import ninjax_old as nj
 
 from . import nets
 from . import outs
@@ -27,7 +27,7 @@ class MLPHead(nj.Module):
   def __init__(self, space, output, **hkw):
     shared = dict(bias=self.bias, winit=self.winit, binit=self.binit)
     mkw = dict(**shared, act=self.act, norm=self.norm)
-    hkw = dict(**shared, **hkw)
+    hkw = {**shared, **hkw}
     self.mlp = nets.MLP(self.layers, self.units, **mkw, name='mlp')
     if isinstance(space, dict):
       self.head = DictHead(space, output, **hkw, name='head')
@@ -59,7 +59,7 @@ class DictHead(nj.Module):
     outputs = {}
     for key, impl in self.outputs.items():
       space = self.spaces[key]
-      outputs[key] = self.sub(key, Head, space, impl, **self.kw)(x)
+      outputs[key] = self.get(key, Head, space, impl, **self.kw)(x)
     return outputs
 
 
@@ -86,9 +86,9 @@ class AggregationTransformerHead(nj.Module):
     init_kw['concatenate_over_layers'] = False
     init_kw['aggregation'] = True
     init_kw['rope'] = False
-    hkw = dict(**shared, **hkw)
+    hkw = {**shared, **hkw}
 
-    self.backbone = self.sub('aggregation_transformer', nets.Transformer, **init_kw)
+    self.backbone = self.get('aggregation_transformer', nets.Transformer, **init_kw)
     if isinstance(space, dict):
       self.head = DictHead(space, output, **hkw, name='head')
     else:
@@ -136,7 +136,7 @@ class Head(nj.Module):
 
   def binary(self, x):
     assert np.all(self.space.classes == 2), self.space
-    logit = self.sub('logit', nets.Linear, self.space.shape, **self.kw)(x)
+    logit = self.get('logit', nets.Linear, self.space.shape, **self.kw)(x)
     return outs.Binary(logit)
 
   def categorical(self, x):
@@ -144,7 +144,7 @@ class Head(nj.Module):
     classes = np.asarray(self.space.classes).flatten()
     assert (classes == classes[0]).all(), classes
     shape = (*self.space.shape, classes[0].item())
-    logits = self.sub('logits', nets.Linear, shape, **self.kw)(x)
+    logits = self.get('logits', nets.Linear, shape, **self.kw)(x)
     output = outs.Categorical(logits)
     output.minent = 0
     output.maxent = np.log(logits.shape[-1])
@@ -152,28 +152,28 @@ class Head(nj.Module):
 
   def onehot(self, x):
     assert not self.space.discrete
-    logits = self.sub('logits', nets.Linear, self.space.shape, **self.kw)(x)
+    logits = self.get('logits', nets.Linear, self.space.shape, **self.kw)(x)
     return outs.OneHot(logits, self.unimix)
 
   def mse(self, x):
     assert not self.space.discrete
-    pred = self.sub('pred', nets.Linear, self.space.shape, **self.kw)(x)
+    pred = self.get('pred', nets.Linear, self.space.shape, **self.kw)(x)
     return outs.MSE(pred)
 
   def huber(self, x):
     assert not self.space.discrete
-    pred = self.sub('pred', nets.Linear, self.space.shape, **self.kw)(x)
+    pred = self.get('pred', nets.Linear, self.space.shape, **self.kw)(x)
     return outs.Huber(pred)
 
   def symlog_mse(self, x):
     assert not self.space.discrete
-    pred = self.sub('pred', nets.Linear, self.space.shape, **self.kw)(x)
+    pred = self.get('pred', nets.Linear, self.space.shape, **self.kw)(x)
     return outs.MSE(pred, nets.symlog)
 
   def symexp_twohot(self, x):
     assert not self.space.discrete
     shape = (*self.space.shape, self.bins)
-    logits = self.sub('logits', nets.Linear, shape, **self.kw)(x)
+    logits = self.get('logits', nets.Linear, shape, **self.kw)(x)
     if self.bins % 2 == 1:
       half = jnp.linspace(-20, 0, (self.bins - 1) // 2 + 1, dtype=f32)
       half = nets.symexp(half)
@@ -186,8 +186,8 @@ class Head(nj.Module):
 
   def bounded_normal(self, x):
     assert not self.space.discrete
-    mean = self.sub('mean', nets.Linear, self.space.shape, **self.kw)(x)
-    stddev = self.sub('stddev', nets.Linear, self.space.shape, **self.kw)(x)
+    mean = self.get('mean', nets.Linear, self.space.shape, **self.kw)(x)
+    stddev = self.get('stddev', nets.Linear, self.space.shape, **self.kw)(x)
     lo, hi = self.minstd, self.maxstd
     stddev = (hi - lo) * jax.nn.sigmoid(stddev + 2.0) + lo
     output = outs.Normal(jnp.tanh(mean), stddev)
@@ -197,7 +197,7 @@ class Head(nj.Module):
 
   def normal_logstd(self, x):
     assert not self.space.discrete
-    mean = self.sub('mean', nets.Linear, self.space.shape, **self.kw)(x)
-    stddev = self.sub('stddev', nets.Linear, self.space.shape, **self.kw)(x)
+    mean = self.get('mean', nets.Linear, self.space.shape, **self.kw)(x)
+    stddev = self.get('stddev', nets.Linear, self.space.shape, **self.kw)(x)
     output = outs.Normal(mean, jnp.exp(stddev))
     return output

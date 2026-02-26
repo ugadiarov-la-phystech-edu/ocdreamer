@@ -4,7 +4,7 @@ from collections import Counter
 
 import jax
 from jax.sharding import PartitionSpec as P
-import ninjax as nj
+from dreamerv3 import ninjax_old as nj
 
 from . import nets as nn
 
@@ -28,10 +28,10 @@ def init(
 ):
 
   def init(fun, **jit_kwargs):
-    if not getattr(fun, '_is_pure', False):
+    if not getattr(fun, 'pure', False):
       fun = nj.pure(fun)
     def wrapper(*args, **kwargs):
-      state, out = fun(*args, create=True, modify=True, ignore=True, **kwargs)
+      out, state = fun(*args, create=True, modify=True, ignore=True, **kwargs)
       del out
       return state, ()
     return wrapper
@@ -41,7 +41,7 @@ def init(
     params, seed, *args = args
     old = nn.LAYER_CALLBACK
     nn.LAYER_CALLBACK = create_layer_callback(mesh, act_partition_rules)
-    params, _ = inner(params, *args, seed=seed)
+    params, _ = inner(params, seed, *args)
     nn.LAYER_CALLBACK = old
     return params
 
@@ -85,7 +85,7 @@ def apply(
       params, seed, *args = args
     if use_shardmap and len(mesh.devices) > 1 and split_rng:
       seed = jax.random.fold_in(seed, jax.lax.axis_index('d'))
-    params, outs = inner(params, *args, seed=seed)
+    outs, params = inner(params, seed, *args)
     outs = (outs,) if single_output else outs
     assert isinstance(outs, tuple)
     return (params, *outs) if return_params else outs
@@ -139,7 +139,7 @@ def apply(
 
 def create_layer_callback(mesh, partition_rules):
   def layer_callback(y, name):
-    name = f'{nj.ninjax.SCOPE}/{name}'
+    name = f'{nj.SCOPE}/{name}'
     for rule, spec in partition_rules:
       if re.search(rule, name):
         sharding = jax.sharding.NamedSharding(mesh, spec)

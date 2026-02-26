@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
-import ninjax as nj
 import numpy as np
+from dreamerv3 import ninjax_old as nj
 
 from embodied.jax import utils
 
@@ -19,14 +19,14 @@ class Layer(nj.Module):
     assert c.shape == (7,)
     assert k.shape == (13, 7)
     shape = (x.shape[-1], self.units)
-    winit = lambda: jax.random.normal(nj.seed(), shape, f32)
-    x = x @ self.value('kernel', winit)
+    winit = lambda: jax.random.normal(nj.rng(), shape, f32)
+    x = x @ self.get('kernel', winit)
     if 'outer3' not in nj.context():
       nj.context()['outer3'] = jnp.zeros((), i32)
     nj.context()['outer3'] += 1
     nj.context()['outer1'] += 1
-    inner = self.value('inner', jnp.array(0))
-    self.write('inner', inner + nj.context()['outer2'])
+    inner = self.get('inner', jnp.array(0))
+    self.put('inner', inner + nj.context()['outer2'])
     return x
 
 
@@ -42,7 +42,7 @@ class Net(nj.Module):
       nj.context()['outer2'] = jnp.ones((), i32)
     nj.context()['outer1'] += 1
 
-    module = self.sub('linear', Layer, units=self.units)
+    module = self.get('linear', Layer, units=self.units)
     c = jnp.zeros((self.layers, 7))
     k = jnp.zeros((13, 7))
     x = utils.LayerScan(module, self.layers)(x, c, k=k)
@@ -58,7 +58,7 @@ class TestLayerScan:
   def test_init(self, L=4, B=2, D=8):
     x = np.random.normal(0, 1, (B, D))
     net = Net(layers=L, units=D, name='net')
-    params = nj.init(net)({}, x, seed=0)
+    _, params = nj.pure(net)({}, jax.random.PRNGKey(0), x, ignore=True)
     assert set(params.keys()) == {
         'outer1', 'outer2', 'outer3',
         'net/linear/kernel', 'net/linear/inner'}
@@ -76,8 +76,8 @@ class TestLayerScan:
   def test_apply(self, L=4, B=2, D=8):
     x = np.random.normal(0, 1, (B, D))
     net = Net(layers=L, units=D, name='net')
-    params = nj.init(net)({}, x, seed=0)
-    params, out = nj.pure(net)(params, x)
+    _, params = nj.pure(net)({}, jax.random.PRNGKey(0), x, ignore=True)
+    out, params = nj.pure(net)(params, jax.random.PRNGKey(0), x, create=False)
     assert out.shape == (B, D)
     assert params['outer1'] == L + 2
     assert params['outer2'] == 1
@@ -97,6 +97,6 @@ class TestLayerScan:
       params = {k: v - 0.1 * grads[k] for k, v in params.items()}
       nj.context().update(params)
       return loss
-    params = nj.init(net)({}, x, seed=0)
-    params, loss = nj.pure(fn)(params, x)
+    _, params = nj.pure(net)({}, jax.random.PRNGKey(0), x, ignore=True)
+    loss, params = nj.pure(fn)(params, jax.random.PRNGKey(0), x, create=False)
     assert loss.shape == ()

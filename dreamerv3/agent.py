@@ -6,17 +6,17 @@ import embodied.jax
 import embodied.jax.nets as nn
 import jax
 import jax.numpy as jnp
-import ninjax as nj
 import numpy as np
 import optax
 
+from . import ninjax_old as nj
 from . import ssm
 from embodied import make_image
 
 f32 = jnp.float32
 i32 = jnp.int32
 sg = lambda xs, skip=False: xs if skip else jax.lax.stop_gradient(xs)
-sample = lambda xs: jax.tree.map(lambda x: x.sample(nj.seed()), xs)
+sample = lambda xs: jax.tree.map(lambda x: x.sample(nj.rng()), xs)
 prefix = lambda xs, p: {f'{p}/{k}': v for k, v in xs.items()}
 concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
 prepend = lambda x, y: jnp.concatenate([x, y], 1)

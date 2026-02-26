@@ -10,8 +10,8 @@ import embodied
 import jax
 import jax.experimental.multihost_utils
 import jax.numpy as jnp
-import ninjax as nj
 import numpy as np
+from dreamerv3 import ninjax_old as nj
 P = jax.sharding.PartitionSpec
 
 from . import internal
@@ -471,7 +471,14 @@ class Agent(embodied.Agent):
   def _summary(self):
     lines = []
     for k, v in self.params.items():
-      lines.append(f'{k:<40} {v.dtype} {v.size} {v.shape}')
+      leaves = jax.tree.leaves(v)
+      if len(leaves) == 1:
+        x = leaves[0]
+        lines.append(f'{k:<40} {x.dtype} {x.size} {x.shape}')
+      else:
+        size = sum(x.size for x in leaves)
+        dtypes = sorted({str(x.dtype) for x in leaves})
+        lines.append(f'{k:<40} {"|".join(dtypes)} {size} pytree[{len(leaves)}]')
     return '\n'.join(lines)
 
   def _zeros(self, spaces, batch_shape):
@@ -495,10 +502,10 @@ class Agent(embodied.Agent):
       return 'No available'
 
 def init(fun, **jit_kwargs):
-  if not getattr(fun, '_is_pure', False):
+  if not getattr(fun, 'pure', False):
     fun = nj.pure(fun)
   def wrapper(*args, **kwargs):
-    state, out = fun(*args, create=True, modify=True, ignore=True, **kwargs)
+    out, state = fun(*args, create=True, modify=True, ignore=True, **kwargs)
     del out
     return state, ()
   return wrapper
