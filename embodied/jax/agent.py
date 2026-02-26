@@ -471,7 +471,15 @@ class Agent(embodied.Agent):
   def _summary(self):
     lines = []
     for k, v in self.params.items():
-      lines.append(f'{k:<40} {v.dtype} {v.size} {v.shape}')
+      leaves = jax.tree.leaves(v)
+      if len(leaves) == 1 and hasattr(leaves[0], 'dtype'):
+        leaf = leaves[0]
+        lines.append(f'{k:<40} {leaf.dtype} {leaf.size} {leaf.shape}')
+      else:
+        sizes = [getattr(x, 'size', 0) for x in leaves]
+        dtypes = sorted({str(getattr(x, 'dtype', type(x).__name__)) for x in leaves})
+        lines.append(
+            f'{k:<40} pytree[{len(leaves)}] {sum(sizes)} {dtypes}')
     return '\n'.join(lines)
 
   def _zeros(self, spaces, batch_shape):

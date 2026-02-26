@@ -80,11 +80,11 @@ class Agent(embodied.jax.Agent):
         self.model_modules.append(self.enc)
 
     self.model_opt = embodied.jax.Optimizer(
-        self.model_modules, self._make_opt(**config.opt_model), summary_depth=1, name='model_opt')
+      **config.opt_model, name='model_opt')
     self.policy_opt = embodied.jax.Optimizer(
-        [self.pol], self._make_opt(**config.opt_policy), summary_depth=1, name='policy_opt')
+      **config.opt_policy, name='policy_opt')
     self.value_opt = embodied.jax.Optimizer(
-        [self.val], self._make_opt(**config.opt_value), summary_depth=1, name='value_opt')
+      **config.opt_value, name='value_opt')
 
     scales = self.config.loss_scales.copy()
     rec = scales.pop('rec')
@@ -194,17 +194,20 @@ class Agent(embodied.jax.Agent):
     carry, obs, prevact, is_last, stepid = self._apply_replay_context(carry, data)
     # Train model
     model_metrics, (carry, entries, outs, mets) = self.model_opt(
-        self.model_loss, carry, obs, prevact, is_last, training=True, has_aux=True)
+        self.model_modules, self.model_loss,
+        carry, obs, prevact, is_last, training=True, has_aux=True)
     metrics = model_metrics.copy()
     metrics.update(mets)
     # Train policy
     policy_metrics, (carry, p_entries, outs, policy_mets) = self.policy_opt(
-      self.policy_loss, carry, obs, prevact, is_last, outs, training=True, has_aux=True)
+      [self.pol], self.policy_loss,
+      carry, obs, prevact, is_last, outs, training=True, has_aux=True)
     metrics.update(policy_metrics)
     metrics.update(policy_mets)
     # Train value
     value_metrics, (carry, v_entries, outs, value_mets) = self.value_opt(
-      self.value_loss, carry, obs, prevact, is_last, outs, training=True, has_aux=True)
+      [self.val], self.value_loss,
+      carry, obs, prevact, is_last, outs, training=True, has_aux=True)
     metrics.update(value_metrics)
     metrics.update(value_mets)
     self.slowval.update()
@@ -614,36 +617,6 @@ class Agent(embodied.jax.Agent):
         (rep_carry, rep_obs, rep_prevact, rep_is_last, rep_stepid))
     return carry, obs, prevact, is_last, stepid
 
-  def _make_opt(
-      self,
-      lr: float = 1e-4,
-      opt: str = 'adam',
-      eps: float = 1e-8,
-      clip: float = 1000.0,
-      wd: float = 0.0,
-      warmup: int = 0,
-      lateclip: float = 0.0,
-      **kwargs
-  ):
-  
-    chain = []
-    if clip:
-      chain.append(optax.clip_by_global_norm(clip))
-    if opt == 'adam':
-      chain.append(optax.adam(learning_rate=lr, eps=eps))
-    elif opt == 'lion':
-      chain.append(optax.lion(learning_rate=lr))
-    else:
-      raise NotImplementedError(opt)
-    if lateclip:
-      chain.append(embodied.jax.opt.late_grad_clip(lateclip))
-    if wd:
-      chain.append(optax.add_decayed_weights(wd))
-    if warmup:
-      schedule = optax.linear_schedule(0.0, lr, warmup)
-      chain.append(optax.inject_hyperparams(optax.scale)(schedule))
-    return optax.chain(*chain)
-  
   def preprocess(self, obs):
     obs = obs.copy()
     for key, value in obs.items():
