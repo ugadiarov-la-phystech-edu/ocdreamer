@@ -658,10 +658,10 @@ class Encoder(nj.Module):
       squish = nn.symlog if self.symlog else lambda x: x
       x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
       x = x.reshape((-1, *x.shape[bdims:]))
-      # x = nn.cast(x)  # ensure compute dtype
-      # for i in range(self.layers):
-      #   x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
-      #   x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
+      x = nn.cast(x)  # ensure compute dtype
+      for i in range(self.layers):
+        x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
       assert len(self.veckeys)==1, "Expected only token or token_embed as vector input"
       for k in self.veckeys:  
         outs[k] = x
@@ -730,7 +730,7 @@ class Decoder(nj.Module):
       self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
     self.kw = kw
     self.vec_dist = kw.pop('vec_dist', None)
-  
+    self.cnn_sigmoid = False
     if len(self.slotkeys) > 0:
       assert len(self.slotkeys) == 1, f'{self.slotkeys}'
       assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
@@ -824,7 +824,10 @@ class Decoder(nj.Module):
         x = x.repeat(2, -2).repeat(2, -3)
         kw = dict(**self.kw, outscale=self.outscale)
         x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
-      x = jax.nn.sigmoid(x)
+      if self.cnn_sigmoid:
+        x = jax.nn.sigmoid(x)
+      else:
+        x = x + 0.5
       x = x.reshape((*bshape, *x.shape[1:]))
       split = np.cumsum(
           [self.obs_space[k].shape[-1] for k in self.imgkeys][:-1])
