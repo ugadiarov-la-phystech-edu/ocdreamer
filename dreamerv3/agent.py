@@ -132,23 +132,25 @@ class Agent(embodied.jax.Agent):
   def init_policy(self, batch_size):
     carry, action = self.dyn.initial_with_context(batch_size)
     text_context = None
+    any_act = action.values()[0]
     return (
         self.enc.initial(batch_size),
         carry,
         self.dec.initial(batch_size),
         action,
-        {'is_last': jnp.ones(action['action'].shape[:2], dtype=i32)},
+        {'is_last': jnp.ones(any_act.shape[:2], dtype=i32)},
         text_context,
     )
 
   def init_train(self, batch_size):
     carry, action = self.dyn.initial(batch_size)
+    any_act = action.values()[0]  
     return (
         self.enc.initial(batch_size),
         carry,
         self.dec.initial(batch_size),
         action,
-        {'is_last': jnp.ones(action['action'].shape[:1], dtype=i32)})
+        {'is_last': jnp.ones(any_act.shape[:1], dtype=i32)})
 
   def init_report(self, batch_size):
     return self.init_train(batch_size)
@@ -164,7 +166,7 @@ class Agent(embodied.jax.Agent):
       current_text = tokens[text_key]
       if text_context is None:
         B = current_text.shape[0]
-        T = prevact['action'].shape[1]
+        T = prevact.values()[0].shape[1]
         text_context = jnp.zeros((B, T, *current_text.shape[1:]), current_text.dtype)
       text_context = prepend(text_context[:, 1:], current_text[:, None])
       dyn_kwargs['text_embeds'] = text_context
@@ -179,7 +181,8 @@ class Agent(embodied.jax.Agent):
         lambda x: jnp.isfinite(x).all(range(1, x.ndim)),
         dict(obs=obs, carry=carry, tokens=tokens, feat=feat, act=act)))
 
-    prevact['action'] = prepend(prevact['action'][:, 1:], act['action'][:, None])
+    for k in self.act_space:
+      prevact[k] = prepend(prevact[k][:, 1:], act[k][:, None])
     is_last['is_last'] = prepend(is_last['is_last'][:, 1:], obs['is_last'][:, None].astype(is_last['is_last'].dtype))
     carry = (enc_carry, dyn_carry, dec_carry, prevact, is_last, text_context)
 
@@ -237,12 +240,14 @@ class Agent(embodied.jax.Agent):
       space, value = self.obs_space[key], obs[key]
       #assert value.dtype == space.dtype, (key, space, value.dtype)
       target = f32(value) / 255 if isimage(space) else value
-      target = jax.nn.one_hot(target, self.obs_space[key].high) if key == 'token' else target
+      if space.discrete and not isimage(space):
+        classes = int(np.asarray(space.classes).flatten()[0])
+        target = jax.nn.one_hot(target, classes)
       losses[key] = recon.loss(sg(target))
     if 'lm' in self.scales.keys():
       print("Adding LM loss")
-      next_ac = prevact[:, :-1].reshape((-1, 1, *prevact.shape[2:]))
-      context = {'feat': repfeat[:, :-1].reshape((-1, *repfeat.shape[2:]))}
+      next_ac = jax.tree.map(lambda x: x[:, :-1].reshape((-1, 1, *x.shape[2:])), prevact)
+      context = {'feat': jax.tree.map(lambda x: x[:, :-1].reshape((-1, *x.shape[2:])), repfeat)}
       one_step = self.dec(self.dyn.imagine(next_ac, context, False))
       truth = obs['token'][:, 1:].reshape((-1, 1, *obs['token'].shape[2:]))
       nll = -(one_step["token"].log_prob(truth)).mean(-1)

@@ -37,6 +37,7 @@ defaults:
     loconav: {size: [64, 64], repeat: 1, camera: -1}
     homegrid: {size: [64, 64], max_steps: 100, num_trashobjs: 2, num_trashcans: 2, p_teleport: 0.05, p_unsafe: 0.0, vis: False}
     messenger: {size: [16,16], length: 64, vis: False}
+    langroom: {length: 200, vocab_size: 15}
 
   replay:
     size: 5e6
@@ -251,6 +252,16 @@ messenger:
   replay.size: 1e6
   run.steps: 1e6
   agent.dec.simple.img_dist: binary
+
+langroom:
+  task: langroom_answer-only
+  run.envs: 1
+  run.eval_envs: 1
+  run.train_ratio: 16
+  #run.log_keys_video: [image, log_image]
+  .*\.vec_keys: 'text' 
+  .*\.img_keys: 'image'
+  agent.dec.simple.vec_dist: onehot
 
 dynalang:
   agent.dyn.typ: rssm
