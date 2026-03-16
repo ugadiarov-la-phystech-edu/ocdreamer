@@ -435,7 +435,9 @@ class PadImage(Wrapper):
     spaces = self.env.obs_space
     for key in self._keys:
       shape = self._size + spaces[key].shape[2:]
-      spaces[key] = elements.Space(np.uint8, shape)
+      low = spaces[key].low.flat[0] if hasattr(spaces[key].low, 'flat') else spaces[key].low
+      high = spaces[key].high.flat[0] if hasattr(spaces[key].high, 'flat') else spaces[key].high
+      spaces[key] = elements.Space(spaces[key].dtype, shape, low, high)
     return spaces
 
   def step(self, action):
@@ -445,6 +447,6 @@ class PadImage(Wrapper):
     return obs
 
   def _resize(self, image):
-    new = np.zeros((*self._size, image.shape[-1]))
+    new = np.zeros((*self._size, image.shape[-1]), dtype=image.dtype)
     new[:image.shape[0], :image.shape[1]] = image
     return new

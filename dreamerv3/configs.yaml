@@ -101,9 +101,11 @@ defaults:
     enc:
       typ: simple
       simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
+      resnet: {vec_keys: '.*', img_keys: '.*', cnn_depth: 96, cnn_blocks: 0, mlp_layers: 5, mlp_units: 1024, resize: stride, minres: 4, act: silu, norm: layer, symlog: False, winit: trunc_normal_in}
     dec:
       typ: simple
-      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', vec_dist: symlog_mse, img_dist: mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
+      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', vec_dist: symlog_mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
+      resnet: {vec_keys: '.*', img_keys: '.*', cnn_depth: 96, cnn_blocks: 0, mlp_layers: 5, mlp_units: 1024, resize: stride, minres: 4, act: silu, norm: layer, vector_dist: symlog_mse, image_dist: mse, outscale: 1.0, cnn_sigmoid: False, winit: trunc_normal_in}
     rewhead:
       typ: mlp
       mlp: { layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255 }
@@ -306,3 +308,4 @@ debug:
     .*\.hidden: 3
     .*\.blocks: 4
     .*\.depth: 2
+    .*\.bspace: 0

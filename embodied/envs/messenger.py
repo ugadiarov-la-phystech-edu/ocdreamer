@@ -107,7 +107,7 @@ class Messenger(embodied.Env):
                                 in range(layers.shape[-1])])
     new_ob[:, :, 0] = 0
     assert new_ob.shape == self.observation_space["image"].shape
-    return new_ob
+    return new_ob.astype(np.float32)
 
   @property
   def observation_space(self):

@@ -660,10 +660,10 @@ class Encoder(nj.Module):
       squish = nn.symlog if self.symlog else lambda x: x
       x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
       x = x.reshape((-1, *x.shape[bdims:]))
-      # x = nn.cast(x)  # ensure compute dtype
-      # for i in range(self.layers):
-      #   x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
-      #   x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
+      x = nn.cast(x)  # ensure compute dtype
+      for i in range(self.layers):
+        x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
       assert len(self.veckeys)==1, "Expected only token or token_embed as vector input"
       for k in self.veckeys:  
         outs[k] = x
@@ -671,8 +671,7 @@ class Encoder(nj.Module):
     if self.imgkeys and not only_text:
       K = self.kernel
       imgs = [obs[k] for k in sorted(self.imgkeys)]
-      assert all(x.dtype == jnp.uint8 for x in imgs)
-      x = nn.cast(jnp.concatenate(imgs, -1), force=True) / 255 - 0.5
+      x = nn.cast(jnp.concatenate(imgs, -1)) - 0.5
       x = x.reshape((-1, *x.shape[bdims:]))
       for i, depth in enumerate(self.depths):
         if self.outer and i == 0:
@@ -733,8 +732,7 @@ class Decoder(nj.Module):
       self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
     self.kw = kw
     self.vec_dist = kw.pop('vec_dist', None)
-    self.img_dist = kw.pop('img_dist', None)
-  
+    self.cnn_sigmoid = False
     if len(self.slotkeys) > 0:
       assert len(self.slotkeys) == 1, f'{self.slotkeys}'
       assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
@@ -828,12 +826,202 @@ class Decoder(nj.Module):
         x = x.repeat(2, -2).repeat(2, -3)
         kw = dict(**self.kw, outscale=self.outscale)
         x = self.sub('imgout', nn.Conv2D, self.imgdep, K, **kw)(x)
-      if self.img_dist == 'mse':
+      if self.cnn_sigmoid:
         x = jax.nn.sigmoid(x)
-      elif self.img_dist == 'binary':
-        pass
       else:
-        raise NotImplementedError(self.img_dist)
+        x = x + 0.5
+      x = x.reshape((*bshape, *x.shape[1:]))
+      split = np.cumsum(
+          [self.obs_space[k].shape[-1] for k in self.imgkeys][:-1])
+      for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
+        out = embodied.jax.outs.MSE(out)
+        out = embodied.jax.outs.Agg(out, 3, jnp.sum)
+        recons[k] = out
+
+    entries = {}
+    return carry, entries, recons
+
+
+class ResnetEncoder(nj.Module):
+
+  def __init__(self, obs_space, img_keys=r'.*', vec_keys=r'.*',
+               mlp_layers=5, mlp_units=1024, cnn_depth=96, cnn_blocks=0,
+               resize='stride', minres=4, symlog=False, act='silu', norm='layer', **kw):
+    assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
+    self.obs_space = obs_space
+    self.slot_keys = kw.pop('slot_keys', '.*')
+    self.slotkeys = []
+    self.veckeys = [k for k, s in obs_space.items()
+                    if len(s.shape) <= 2 and re.match(vec_keys, k)]
+    self.imgkeys = [k for k, s in obs_space.items()
+                    if len(s.shape) == 3 and re.match(img_keys, k)]
+    self.mlp_layers = mlp_layers
+    self.mlp_units = mlp_units
+    self.cnn_depth = cnn_depth
+    self.cnn_blocks = cnn_blocks
+    self.resize = resize
+    self.minres = minres
+    self.symlog = symlog
+    self.act = act
+    self.norm = norm
+    self.kw = kw
+
+  @property
+  def entry_space(self):
+    return {}
+
+  def initial(self, batch_size):
+    return {}
+
+  def truncate(self, entries, carry=None):
+    return {}
+
+  def __call__(self, carry, obs, reset, training, single=False, only_text=False):
+    bdims = 1 if single else 2
+    bshape = reset.shape
+    tokens = {}
+
+    if self.imgkeys and not only_text:
+      imgs = [obs[k] for k in sorted(self.imgkeys)]
+      x = nn.cast(jnp.concatenate(imgs, -1)) - 0.5
+      x = x.reshape((-1, *x.shape[bdims:]))
+      stages = int(np.log2(x.shape[-2]) - np.log2(self.minres))
+      depth = self.cnn_depth
+      for i in range(stages):
+        if self.resize == 'stride':
+          x = self.sub(f's{i}res', nn.Conv2D, depth, 4, 2, **self.kw)(x)
+        else:
+          raise NotImplementedError(self.resize)
+        x = nn.act(self.act)(self.sub(f's{i}norm', nn.Norm, self.norm)(x))
+        for j in range(self.cnn_blocks):
+          skip = x
+          x = nn.act(self.act)(self.sub(f's{i}b{j}n1', nn.Norm, self.norm)(x))
+          x = self.sub(f's{i}b{j}c1', nn.Conv2D, depth, 3, **self.kw)(x)
+          x = nn.act(self.act)(self.sub(f's{i}b{j}n2', nn.Norm, self.norm)(x))
+          x = self.sub(f's{i}b{j}c2', nn.Conv2D, depth, 3, **self.kw)(x)
+          x += skip
+        depth *= 2
+      if self.cnn_blocks:
+        x = nn.act(self.act)(x)
+      x = x.reshape((x.shape[0], -1))
+      x = x.reshape((*bshape, *x.shape[1:]))
+      assert len(self.imgkeys) == 1, 'Expected one image input'
+      for k in self.imgkeys:
+        tokens[k] = x
+
+    if self.veckeys:
+      vspace = {k: self.obs_space[k] for k in self.veckeys}
+      vecs = {k: obs[k] for k in self.veckeys}
+      squish = nn.symlog if self.symlog else lambda x: x
+      x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
+      x = x.reshape((-1, *x.shape[bdims:]))
+      x = nn.cast(x)
+      for i in range(self.mlp_layers):
+        x = self.sub(f'mlp{i}', nn.Linear, self.mlp_units, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'mlp{i}n', nn.Norm, self.norm)(x))
+      x = x.reshape((*bshape, *x.shape[1:]))
+      assert len(self.veckeys) == 1, 'Expected one vector input'
+      for k in self.veckeys:
+        tokens[k] = x
+
+    entries = {}
+    return carry, entries, tokens
+
+
+class ResnetDecoder(nj.Module):
+
+  def __init__(self, obs_space, img_keys=r'.*', vec_keys=r'.*',
+               mlp_layers=5, mlp_units=1024, cnn_depth=96, cnn_blocks=0,
+               resize='stride', minres=4, cnn_sigmoid=False,
+               image_dist='mse', vector_dist='symlog_mse',
+               outscale=1.0, act='silu', norm='layer', **kw):
+    assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
+    self.obs_space = obs_space
+    kw.pop('slot_keys', '.*')
+    self.slotkeys = []
+    self.veckeys = [k for k, s in obs_space.items()
+                    if len(s.shape) <= 2 and re.match(vec_keys, k)]
+    self.imgkeys = [k for k, s in obs_space.items()
+                    if len(s.shape) == 3 and re.match(img_keys, k)]
+    self.mlp_layers = mlp_layers
+    self.mlp_units = mlp_units
+    self.cnn_depth = cnn_depth
+    self.cnn_blocks = cnn_blocks
+    self.resize = resize
+    self.minres = minres
+    self.cnn_sigmoid = cnn_sigmoid
+    self.vec_dist = vector_dist
+    self.image_dist = image_dist
+    self.outscale = outscale
+    if self.imgkeys:
+      shapes = [obs_space[k].shape for k in self.imgkeys]
+      assert all(s[:-1] == shapes[0][:-1] for s in shapes)
+      self._imgshape = shapes[0][:-1] + (sum(s[-1] for s in shapes),)
+    self.act = act
+    self.norm = norm
+    self.kw = kw
+
+  @property
+  def entry_space(self):
+    return {}
+
+  def initial(self, batch_size):
+    return {}
+
+  def truncate(self, entries, carry=None):
+    return {}
+
+  def __call__(self, carry, feat, reset, training, single=False):
+    recons = {}
+    bshape = reset.shape
+
+    inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
+    inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
+    inp = jnp.concatenate(inp, -1)
+
+    if self.veckeys:
+      spaces = {k: self.obs_space[k] for k in self.veckeys}
+      outputs = {k: self.vec_dist for k in spaces.keys()}
+      kw = dict(**self.kw, act=self.act, norm=self.norm)
+      x = self.sub('mlp_vec', nn.MLP, self.mlp_layers, self.mlp_units, **kw)(inp)
+      x = x.reshape((*bshape, *x.shape[1:]))
+      kw_head = dict(**self.kw, outscale=self.outscale)
+      outs = self.sub('vec', embodied.jax.DictHead, spaces, outputs, **kw_head)(x)
+      recons.update(outs)
+
+    if self.imgkeys:
+      stages = int(np.log2(self._imgshape[-2]) - np.log2(self.minres))
+      depth = self.cnn_depth * 2 ** (stages - 1)
+      x = nn.cast(inp)
+      x = self.sub('cnn_in', nn.Linear, (self.minres, self.minres, depth),
+                    **self.kw)(x)
+      for i in range(stages):
+        for j in range(self.cnn_blocks):
+          skip = x
+          x = nn.act(self.act)(self.sub(f's{i}b{j}n1', nn.Norm, self.norm)(x))
+          x = self.sub(f's{i}b{j}c1', nn.Conv2D, depth, 3, **self.kw)(x)
+          x = nn.act(self.act)(self.sub(f's{i}b{j}n2', nn.Norm, self.norm)(x))
+          x = self.sub(f's{i}b{j}c2', nn.Conv2D, depth, 3, **self.kw)(x)
+          x += skip
+        depth //= 2
+        if i == stages - 1:
+          out_depth = self._imgshape[-1]
+          x = self.sub(f's{i}up', nn.Conv2D, out_depth, 4, 2,
+                       transp=True)(x)
+        else:
+          x = self.sub(f's{i}up', nn.Conv2D, depth, 4, 2,
+                       transp=True, **self.kw)(x)
+          x = nn.act(self.act)(self.sub(f's{i}upn', nn.Norm, self.norm)(x))
+      if max(x.shape[1:-1]) > max(self._imgshape[:-1]):
+        padh = (x.shape[1] - self._imgshape[0]) / 2
+        padw = (x.shape[2] - self._imgshape[1]) / 2
+        x = x[:, int(np.ceil(padh)):-int(padh), :]
+        x = x[:, :, int(np.ceil(padw)):-int(padw)]
+      assert x.shape[-3:] == self._imgshape, (x.shape, self._imgshape)
+      if self.cnn_sigmoid:
+        x = jax.nn.sigmoid(x)
+      else:
+        x = x + 0.5
       x = x.reshape((*bshape, *x.shape[1:]))
       split = np.cumsum(
           [self.obs_space[k].shape[-1] for k in self.imgkeys][:-1])

@@ -42,6 +42,7 @@ class Agent(embodied.jax.Agent):
     dec_space = {k: v for k, v in obs_space.items() if k not in exclude}
     self.enc = {
         'simple': ssm.Encoder,
+        'resnet': ssm.ResnetEncoder,
     }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
     self.dyn = {
         'rssm': ssm.RSSM,
@@ -50,6 +51,7 @@ class Agent(embodied.jax.Agent):
     }[config.dyn.typ](act_space, obs_space, **config.dyn[config.dyn.typ], name='dyn')
     self.dec = {
         'simple': ssm.Decoder,
+        'resnet': ssm.ResnetDecoder,
     }[config.dec.typ](dec_space, **config.dec[config.dec.typ], name='dec')
 
     self.feat2tensor = lambda x: jnp.concatenate([
@@ -156,6 +158,7 @@ class Agent(embodied.jax.Agent):
     return self.init_train(batch_size)
 
   def policy(self, carry, obs, mode='train'):
+    obs = self.preprocess(obs)
     (enc_carry, dyn_carry, dec_carry, prevact, is_last, text_context) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
@@ -193,6 +196,7 @@ class Agent(embodied.jax.Agent):
 
   def train(self, carry, data):
     carry, obs, prevact, is_last, stepid = self._apply_replay_context(carry, data)
+    obs = self.preprocess(obs)
     metrics, (carry, entries, outs, mets) = self.opt(
         self.loss, carry, obs, prevact, is_last, training=True, has_aux=True)
     metrics.update(mets)
@@ -237,13 +241,7 @@ class Agent(embodied.jax.Agent):
       con *= 1 - 1 / self.config.horizon
     losses['con'] = self.con(self.feat2tensor(repfeat), 2, training=training).loss(con)
     for key, recon in recons.items():
-      space, value = self.obs_space[key], obs[key]
-      #assert value.dtype == space.dtype, (key, space, value.dtype)
-      target = f32(value) / 255 if isimage(space) else value
-      if space.discrete and not isimage(space):
-        classes = int(np.asarray(space.classes).flatten()[0])
-        target = jax.nn.one_hot(target, classes)
-      losses[key] = recon.loss(sg(target))
+      losses[key] = recon.loss(sg(obs[key]))
     if 'lm' in self.scales.keys():
       print("Adding LM loss")
       next_ac = jax.tree.map(lambda x: x[:, :-1].reshape((-1, 1, *x.shape[2:])), prevact)
@@ -317,11 +315,11 @@ class Agent(embodied.jax.Agent):
     return loss, (carry, entries, outs, metrics)
 
   def report(self, carry, data):
-    #data = self.preprocess(data)
     if not self.config.report:
       return carry, {}
 
     carry, obs, prevact, is_last, _ = self._apply_replay_context(carry, data)
+    obs = self.preprocess(obs)
     (enc_carry, dyn_carry, dec_carry) = carry
     B, T = obs['is_first'].shape
     reset= obs['is_first']
@@ -371,8 +369,7 @@ class Agent(embodied.jax.Agent):
 
     # Video preds
     for key in self.dec.imgkeys:
-      assert obs[key].dtype == jnp.uint8
-      true = obs[key][:RB]
+      true = jnp.clip(obs[key][:RB] * 255, 0, 255).astype(jnp.uint8)
       pred = jnp.concatenate([obsrecons[key].pred(), imgrecons[key].pred()], 1)
       pred = jnp.clip(pred * 255, 0, 255).astype(jnp.uint8)
       error = ((i32(pred) - i32(true) + 255) / 2).astype(np.uint8)
