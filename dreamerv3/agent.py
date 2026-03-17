@@ -134,7 +134,7 @@ class Agent(embodied.jax.Agent):
   def init_policy(self, batch_size):
     carry, action = self.dyn.initial_with_context(batch_size)
     text_context = None
-    any_act = action.values()[0]
+    any_act = next(iter(action.values()))
     return (
         self.enc.initial(batch_size),
         carry,
@@ -146,7 +146,7 @@ class Agent(embodied.jax.Agent):
 
   def init_train(self, batch_size):
     carry, action = self.dyn.initial(batch_size)
-    any_act = action.values()[0]  
+    any_act = next(iter(action.values()))
     return (
         self.enc.initial(batch_size),
         carry,
@@ -169,7 +169,7 @@ class Agent(embodied.jax.Agent):
       current_text = tokens[text_key]
       if text_context is None:
         B = current_text.shape[0]
-        T = prevact.values()[0].shape[1]
+        T = next(iter(prevact.values())).shape[1]
         text_context = jnp.zeros((B, T, *current_text.shape[1:]), current_text.dtype)
       text_context = prepend(text_context[:, 1:], current_text[:, None])
       dyn_kwargs['text_embeds'] = text_context
@@ -241,7 +241,12 @@ class Agent(embodied.jax.Agent):
       con *= 1 - 1 / self.config.horizon
     losses['con'] = self.con(self.feat2tensor(repfeat), 2, training=training).loss(con)
     for key, recon in recons.items():
-      losses[key] = recon.loss(sg(obs[key]))
+      space = self.obs_space[key]
+      target = obs[key]
+      if space.discrete and not isimage(space):
+        classes = int(np.asarray(space.classes).flatten()[0])
+        target = jax.nn.one_hot(target, classes)
+      losses[key] = recon.loss(sg(target))
     if 'lm' in self.scales.keys():
       print("Adding LM loss")
       next_ac = jax.tree.map(lambda x: x[:, :-1].reshape((-1, 1, *x.shape[2:])), prevact)
@@ -484,13 +489,16 @@ class Agent(embodied.jax.Agent):
     return optax.chain(*chain)
   
   def preprocess(self, obs):
+    spaces = {**self.obs_space, **self.act_space}
     obs = obs.copy()
     for key, value in obs.items():
-      if key.startswith('log') or key in ('key',):
+      if key.startswith('log') or key in ('key','reset', 'id'):
         continue
-      if key in ('is_first', 'is_last', 'is_terminal'):
+      elif key in ('is_first', 'is_last', 'is_terminal'):
         obs[key] = value.astype(jnp.bool_)
         continue
+      elif key in self.act_space and self.act_space[key].discrete:
+        value = jax.nn.one_hot(value, int(self.act_space[key].high))
       elif key == "token":
         value = jax.nn.one_hot(value, self.obs_space[key].high)
         value = value.astype(nn.COMPUTE_DTYPE)

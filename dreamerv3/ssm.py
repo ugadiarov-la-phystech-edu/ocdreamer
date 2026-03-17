@@ -361,7 +361,7 @@ class TSSM(AbstractSSM):
     state_starts = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), entries)
 
     # do not use last step masking during imagination
-    any_act = actions.values()[0]
+    any_act = next(iter(actions.values()))
     is_last = jnp.zeros(any_act.shape[:2], dtype=i32)
     pad_is_last = jnp.ones((is_last.shape[0], pad_length), dtype=is_last.dtype)
     is_last = jax.tree.map(lambda x: self._sliding_window_view_2d(x, self.max_context_length), prepend(pad_is_last, is_last))
@@ -384,7 +384,7 @@ class TSSM(AbstractSSM):
     if isinstance(tokens, dict):
       tokens = jnp.concatenate([v for v in tokens.values()], -1)
     carry, tokens, action, is_last = nn.cast((carry, tokens, action, is_last['is_last']))
-    any_act = action.values()[0]
+    any_act = next(iter(action.values()))
     action = nn.DictConcat(self.act_space, len(any_act.shape) - 1)(action)
     post_logit = self._logit('obslogit', tokens, self.obslayers)
     post_stoch = nn.cast(self._dist(post_logit).sample(seed=nj.seed()))
