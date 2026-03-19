@@ -104,8 +104,8 @@ defaults:
       resnet: {vec_keys: '.*', img_keys: '.*', cnn_depth: 96, cnn_blocks: 0, mlp_layers: 5, mlp_units: 1024, resize: stride, minres: 4, act: silu, norm: layer, symlog: False, winit: trunc_normal_in}
     dec:
       typ: simple
-      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', vec_dist: symlog_mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
-      resnet: {vec_keys: '.*', img_keys: '.*', cnn_depth: 96, cnn_blocks: 0, mlp_layers: 5, mlp_units: 1024, resize: stride, minres: 4, act: silu, norm: layer, vector_dist: symlog_mse, image_dist: mse, outscale: 1.0, cnn_sigmoid: False, winit: trunc_normal_in}
+      simple: {vec_keys: '.*', img_keys: '.*', slot_keys: '.$', vec_dist: symlog_mse, depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False, cnn_sigmoid: False}
+      resnet: {vec_keys: '.*', img_keys: '.*', cnn_depth: 96, cnn_blocks: 0, mlp_layers: 5, mlp_units: 1024, resize: stride, minres: 4, act: silu, norm: layer, vec_dist: symlog_mse, img_dist: mse, outscale: 1.0, cnn_sigmoid: False, winit: trunc_normal_in}
     rewhead:
       typ: mlp
       mlp: { layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255 }
@@ -263,8 +263,7 @@ langroom:
   #run.log_keys_video: [image, log_image]
   .*\.vec_keys: 'text' 
   .*\.img_keys: 'image'
-  agent.dec.simple.vec_dist: onehot
-  agent.dec.resnet.vector_dist: onehot
+  .*\.vec_dist: onehot
 
 dynalang:
   agent.dyn.typ: rssm

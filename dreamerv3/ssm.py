@@ -720,7 +720,7 @@ class Decoder(nj.Module):
   # img_keys: str = '.*'
   slot_key: str = 'slot'
 
-  def __init__(self, obs_space, **kw):
+  def __init__(self, obs_space, cnn_sigmoid=False, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
     self.vec_keys =  kw.pop('vec_keys', '.*')
@@ -736,7 +736,7 @@ class Decoder(nj.Module):
       self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
     self.kw = kw
     self.vec_dist = kw.pop('vec_dist', None)
-    self.cnn_sigmoid = False
+    self.cnn_sigmoid = cnn_sigmoid    
     if len(self.slotkeys) > 0:
       assert len(self.slotkeys) == 1, f'{self.slotkeys}'
       assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
@@ -937,7 +937,7 @@ class ResnetDecoder(nj.Module):
   def __init__(self, obs_space, img_keys=r'.*', vec_keys=r'.*',
                mlp_layers=5, mlp_units=1024, cnn_depth=96, cnn_blocks=0,
                resize='stride', minres=4, cnn_sigmoid=False,
-               image_dist='mse', vector_dist='symlog_mse',
+               img_dist='mse', vec_dist='symlog_mse',
                outscale=1.0, act='silu', norm='layer', **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
@@ -954,8 +954,8 @@ class ResnetDecoder(nj.Module):
     self.resize = resize
     self.minres = minres
     self.cnn_sigmoid = cnn_sigmoid
-    self.vec_dist = vector_dist
-    self.image_dist = image_dist
+    self.vec_dist = vec_dist
+    self.img_dist = img_dist
     self.outscale = outscale
     if self.imgkeys:
       shapes = [obs_space[k].shape for k in self.imgkeys]
