@@ -189,6 +189,7 @@ class RSSM(AbstractSSM):
 
   # rssm fields
   blocks: int = 8
+  bottleneck: int = -1
 
   def __init__(self, act_space, obs_space, **kw):
     super().__init__(act_space, obs_space, **kw)
@@ -279,6 +280,9 @@ class RSSM(AbstractSSM):
     x2 = nn.act(self.act)(self.sub('dynin2norm', nn.Norm, self.norm)(x2))
     x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)
     x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
+    if self.bottleneck > 0:
+      x = self.sub('bottleneck', nn.Linear, self.bottleneck, **self.kw)(x)
+      x = nn.act(self.act)(self.sub('bottlenecknorm', nn.Norm, self.norm)(x))
     for i in range(self.dynlayers):
       x = self.sub(f'dynhid{i}', nn.BlockLinear, self.deter, g, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'dynhid{i}norm', nn.Norm, self.norm)(x))

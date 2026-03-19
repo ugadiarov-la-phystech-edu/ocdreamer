@@ -95,7 +95,7 @@ defaults:
     ac_grads: False
     dyn:
       typ: rssm
-      rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0}
+      rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, bottleneck: -1}
       tssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, free_nats: 1.0, max_context_length: 64, transformer_layers: 6, transformer_heads: 8, transformer_ffup: 4, transformer_act: silu, transformer_norm: layer, transformer_glu: False, transformer_rope: True, transformer_qknorm: none, transformer_bias: True, transformer_outscale: 1.0, transformer_concatenate_over_layers: True, transformer_normalize_out: False, transformer_dropout: 0.0}
       octssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, free_nats: 1.0, max_context_length: 64, transformer_layers: 6, transformer_heads: 8, transformer_ffup: 4, transformer_act: silu, transformer_norm: layer, transformer_glu: False, transformer_position_embedding: sinusoidal, transformer_qknorm: none, transformer_bias: True, transformer_outscale: 1.0, transformer_concatenate_over_layers: True, transformer_normalize_out: False, transformer_dropout: 0.0, action_as_slot: True}
     enc:
@@ -264,6 +264,7 @@ langroom:
   .*\.vec_keys: 'text' 
   .*\.img_keys: 'image'
   agent.dec.simple.vec_dist: onehot
+  agent.dec.resnet.vector_dist: onehot
 
 dynalang:
   agent.dyn.typ: rssm
