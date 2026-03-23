@@ -20,7 +20,7 @@ def eval_only(make_agent, make_env, make_logger, args):
   agg = elements.Agg()
   epstats = elements.Agg()
   episodes = defaultdict(elements.Agg)
-  should_log = elements.when.Clock(args.log_every)
+  should_log = elements.when.Every(args.log_every)
   policy_fps = elements.FPS()
 
   @elements.timer.section('logfn')
