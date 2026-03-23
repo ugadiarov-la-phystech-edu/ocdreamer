@@ -499,9 +499,10 @@ class Agent(embodied.jax.Agent):
         continue
       elif key in self.act_space and self.act_space[key].discrete:
         value = jax.nn.one_hot(value, int(self.act_space[key].high))
-      elif key == "token":
-        value = jax.nn.one_hot(value, self.obs_space[key].high)
-        value = value.astype(nn.COMPUTE_DTYPE)
+      #we do one-hot for token in Encoder
+      # elif key == "token":
+      #   value = jax.nn.one_hot(value, self.obs_space[key].high)
+      #   value = value.astype(nn.COMPUTE_DTYPE)
       elif len(value.shape) > 3 and value.dtype == jnp.uint8:
         value = jax.tree_map(lambda x: x.astype(nn.COMPUTE_DTYPE), value) / 255.0
       else:

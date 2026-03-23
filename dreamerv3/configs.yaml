@@ -221,39 +221,19 @@ loconav:
 homegrid:
   task: homegrid_task
   run.envs: 66
-  agent.enc.simple.vec_keys: token$
-  agent.enc.simple.img_keys: image
-  agent.dec.simple.vec_keys: token$
-  agent.dec.simple.img_keys: image
-  decoder.vec_dist: onehot
+  run.eval_envs: 66
+  .*\.vec_keys: token$
+  .*\.img_keys: image
+  agent.dec.resnet.vec_dist: onehot
   batch_size: 16
   batch_length: 256
-  run.train_ratio: 32
   replay.size: 1e6
   agent.dyn.rssm.deter: 4096
   agent.dyn.rssm.classes: 32
-  agent.rewhead.layers: 5
-  agent.conhead.layers: 5
-  agent.policy.layers: 5
-  agent.value.layers: 5
-
-messenger:
-  task: messenger_s1
-  run.envs: 16
-  run.eval_envs: 16
-  env.messenger.length: 64
-  agent.enc.simple.vec_keys: token_embed
-  agent.enc.simple.img_keys: image
-  #agent.enc.simple.depth: 96
-  agent.dec.simple.vec_keys: token_embed
-  agent.dec.simple.img_keys: image
-  #agent.dec.simple.depth: 96
-  run.train_ratio: 64
-  batch_size: 16
-  batch_length: 256 
-  replay.size: 1e6
-  run.steps: 1e6
-  agent.dec.simple.img_dist: binary
+  agent.rewhead.mlp.layers: 5
+  agent.conhead.mlp.layers: 5
+  agent.policy.mlp.layers: 5
+  agent.value.mlp.layers: 5
 
 langroom:
   task: langroom_answer-only
