@@ -232,6 +232,7 @@ def make_env(config, index, **overrides):
       'langroom': 'embodied.envs.langroom:LangRoom',
       'procgen': 'embodied.envs.procgen:ProcGen',
       'bsuite': 'embodied.envs.bsuite:BSuite',
+      'homegrid': 'embodied.envs.homegrid:HomeGrid',
       'memmaze': lambda task, **kw: from_gym.FromGym(
           f'MemoryMaze-{task}-v0', **kw),
   }[suite]
@@ -250,6 +251,9 @@ def make_env(config, index, **overrides):
 
 
 def wrap_env(env, config):
+  if hasattr(env, "wrappers"):
+    for w in env.wrappers:
+      env = w(env)
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.NormalizeAction(env, name)

@@ -57,13 +57,22 @@ class FromGym(embodied.Env):
   def step(self, action):
     if action['reset'] or self._done:
       self._done = False
-      obs = self._env.reset()
+      result = self._env.reset()
+      obs = result[0] if isinstance(result, tuple) else result
       return self._obs(obs, 0.0, is_first=True)
     if self._act_dict:
       action = self._unflatten(action)
     else:
       action = action[self._act_key]
-    obs, reward, self._done, self._info = self._env.step(action)
+    
+    result = self._env.step(action)
+    # Handle both old gym (4 values) and new gym (5 values)
+    if len(result) == 5:
+      obs, reward, terminated, truncated, self._info = result
+      self._done = terminated or truncated
+    else:
+      obs, reward, self._done, self._info = result
+    
     return self._obs(
         obs, reward,
         is_last=bool(self._done),
