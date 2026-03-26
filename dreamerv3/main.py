@@ -8,7 +8,7 @@ folder = pathlib.Path(__file__).parent
 sys.path.insert(0, str(folder.parent))
 sys.path.insert(1, str(folder.parent.parent))
 __package__ = folder.name
-
+from embodied.core.logger import CometOutput
 import elements
 import embodied
 import numpy as np
@@ -174,6 +174,9 @@ def make_logger(config):
       outputs.append(elements.logger.WandBOutput(name))
     elif output == 'scope':
       outputs.append(elements.logger.ScopeOutput(elements.Path(logdir)))
+    elif output == 'comet':
+      name = '/'.join(logdir.split('/')[-4:])
+      outputs.append(CometOutput(name, config, config.logger.fps))
     else:
       raise NotImplementedError(output)
   logger = elements.Logger(step, outputs, multiplier)
