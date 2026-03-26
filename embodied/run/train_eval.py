@@ -36,9 +36,9 @@ def train_eval(
 
   batch_steps = args.batch_size * args.batch_length
   should_train = elements.when.Ratio(args.train_ratio / batch_steps)
-  should_log = elements.when.Clock(args.log_every)
-  should_report = elements.when.Clock(args.report_every)
-  should_save = elements.when.Clock(args.save_every)
+  should_log = elements.when.Every(args.log_every)
+  should_report = elements.when.Every(args.report_every)
+  should_save = elements.when.Every(args.save_every)
 
   @elements.timer.section('logfn')
   def logfn(tran, worker, mode):
