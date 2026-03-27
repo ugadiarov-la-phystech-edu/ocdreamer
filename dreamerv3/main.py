@@ -4,13 +4,12 @@ import pathlib
 import sys
 from functools import partial as bind
 
-
+from embodied.core.logger import CometOutput, JSONLOutput
 
 folder = pathlib.Path(__file__).parent
 sys.path.insert(0, str(folder.parent))
 sys.path.insert(1, str(folder.parent.parent))
 __package__ = folder.name
-from embodied.core.logger import CometOutput
 import elements
 import embodied
 import numpy as np
@@ -159,9 +158,9 @@ def make_logger(config):
   outputs.append(elements.logger.TerminalOutput(config.logger.filter, 'Agent'))
   for output in config.logger.outputs:
     if output == 'jsonl':
-      outputs.append(elements.logger.JSONLOutput(logdir, 'metrics.jsonl'))
-      outputs.append(elements.logger.JSONLOutput(
-          logdir, 'scores.jsonl', 'episode/score'))
+      outputs.append(JSONLOutput(logdir, 'metrics.jsonl'))
+      outputs.append(JSONLOutput(
+          logdir, 'scores.jsonl', 'episode/(score|success|length)', log_multivalue=True))
     elif output == 'tensorboard':
       outputs.append(elements.logger.TensorBoardOutput(
           logdir, config.logger.fps))

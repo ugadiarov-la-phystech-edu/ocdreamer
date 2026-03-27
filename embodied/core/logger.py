@@ -1,13 +1,14 @@
 import collections
-import concurrent.futures
-import datetime
 import json
 import os
 import re
 import sys
-import time
 import uuid
 
+import elements.logger
+from elements import path
+from elements import printing
+from elements import timer
 import numpy as np
 
 
@@ -78,3 +79,39 @@ class CometOutput:
       metrics = {name: np.mean(value) for name, value in metrics.items()}
       metrics['global_step'] = step
       self._experiment.log_metrics(metrics, step=step)
+
+
+class JSONLOutput(elements.logger.AsyncOutput):
+
+  def __init__(
+      self, logdir, filename='metrics.jsonl', pattern=r'.*', log_multivalue=False,
+      strings=False, parallel=True):
+    super().__init__(self._write, parallel)
+    self._pattern = re.compile(pattern)
+    self._strings = strings
+    self._log_multivalue = log_multivalue
+    logdir = path.Path(logdir)
+    logdir.mkdir()
+    self._filename = logdir / filename
+
+  @timer.section('jsonl')
+  def _write(self, summaries):
+    bystep = collections.defaultdict(lambda: collections.defaultdict(list))
+
+    for step, name, value in summaries:
+      if not self._pattern.search(name):
+        continue
+      if isinstance(value, str) and self._strings:
+        bystep[step][name].append(value)
+      if isinstance(value, np.ndarray) and len(value.shape) == 0:
+        bystep[step][name].append(float(value))
+
+    if not self._log_multivalue:
+      bystep = {step: {name: values[-1:] for name, values in name2values.items()} for step, name2values in bystep.items()}
+
+    lines = ''.join([
+        json.dumps({'step': step, **scalars}) + '\n'
+        for step, scalars in sorted(bystep.items())])
+    printing.print_(f'Writing metrics: {self._filename}')
+    with self._filename.open('a') as f:
+      f.write(lines)

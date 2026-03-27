@@ -133,7 +133,7 @@ def parallel_learner(agent, barrier, args):
   agg = elements.Agg()
   usage = elements.Usage(**args.usage)
   should_log = embodied.GlobalClock(args.log_every)
-  should_report = embodied.GlobalClock(args.report_every)
+  should_report = elements.when.Every(args.report_every)
   should_save = embodied.GlobalClock(args.save_every)
   fps = elements.FPS()
   batch_steps = args.batch_size * args.batch_length
@@ -377,10 +377,10 @@ def parallel_logger(make_logger, args):
           episode.add(key, value, agg='stack')
       if tran['is_last']:
         result = episode.result()
-        logger.add({
-            'score': result.pop('score'),
-            'length': result.pop('length') - 1,
-        }, prefix='episode')
+        result_metrics = {'score': result.pop('score'), 'length': result.pop('length')}
+        if 'log/success' in tran:
+          result_metrics['success'] = int(tran['log/success'])
+        logger.add(result_metrics, prefix='episode')
         rew = result.pop('rewards')
         if len(rew) > 1:
           result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
