@@ -3,6 +3,7 @@ from functools import partial as bind
 
 import elements
 import embodied
+import embodied.core.parallel
 import numpy as np
 
 
@@ -53,7 +54,10 @@ def eval_only(make_agent, make_env, make_logger, args):
       epstats.add(result)
 
   fns = [bind(make_env, i) for i in range(args.envs)]
-  driver = embodied.Driver(fns, parallel=(not args.debug))
+  if args.parallel_strategy != 'none':
+    fns = [bind(embodied.core.parallel.Parallel, fn, args.parallel_strategy) for fn in fns]
+
+  driver = embodied.Driver(fns, parallel_strategy=args.parallel_strategy)
   driver.on_step(lambda tran, _: step.increment())
   driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(logfn)

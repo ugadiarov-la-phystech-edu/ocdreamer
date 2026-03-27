@@ -72,6 +72,7 @@ defaults:
     remote_envs: False
     usage: {psutil: True, nvsmi: True, gputil: False, malloc: False, gc: False}
     debug: True
+    parallel_strategy: process # none, blocking, thread, process, daemon, process_slow
 
   jax:
     platform: cuda
