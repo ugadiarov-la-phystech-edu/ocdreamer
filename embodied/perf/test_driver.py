@@ -2,6 +2,8 @@ import pathlib
 import sys
 from functools import partial as bind
 
+from embodied.core.wrappers import BatchEnv
+
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
 import elements
@@ -16,7 +18,8 @@ class TestDriver:
     example = make_env_fns[0]()
     agent = embodied.RandomAgent(example.obs_space, example.act_space)
     example.close()
-    driver = embodied.Driver(make_env_fns, parallel)
+    batch_env = BatchEnv(make_env_fns, parallel)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     fps = elements.FPS()
     while True:
@@ -30,7 +33,8 @@ class TestDriver:
     example = make_env_fns[0]()
     agent = embodied.RandomAgent(example.obs_space, example.act_space)
     example.close()
-    driver = embodied.Driver(make_env_fns, parallel)
+    batch_env = BatchEnv(make_env_fns, parallel)
+    driver = embodied.Driver(batch_env)
     driver.reset(agent.init_policy)
     fps = elements.FPS()
     while True:

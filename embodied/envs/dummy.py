@@ -59,6 +59,59 @@ class Dummy(embodied.Env):
     )
 
 
+
+class CustomDummySlot(embodied.Env):
+
+  def __init__(self, task, size=(3, 8), length=100):
+    supported_tasks = {'disc', 'cont'}
+    assert task in supported_tasks, f'{task} is not in {supported_tasks}'
+    self.task = task
+    self.size = size
+    self.length = length
+    self.count = 0
+    self.done = False
+
+  @property
+  def obs_space(self):
+    return {
+        'slot': elements.Space(np.float32, self.size),
+        'reward': elements.Space(np.float32),
+        'is_first': elements.Space(bool),
+        'is_last': elements.Space(bool),
+        'is_terminal': elements.Space(bool),
+    }
+
+  @property
+  def act_space(self):
+    if self.task == 'disc':
+      action_space = elements.Space(np.int32, (), 0, 5)
+    else:
+      action_space = elements.Space(np.float32, (6,))
+
+    return {
+        'reset': elements.Space(bool),
+        'action': action_space,
+    }
+
+  def step(self, action):
+    if action.pop('reset') or self.done:
+      self.count = 0
+      self.done = False
+      return self._obs(0, is_first=True)
+    self.count += 1
+    self.done = (self.count >= self.length)
+    return self._obs(1, is_last=self.done, is_terminal=self.done)
+
+  def _obs(self, reward, is_first=False, is_last=False, is_terminal=False):
+    return dict(
+        slot=np.zeros(self.size, np.float32),
+        reward=np.float32(reward),
+        is_first=is_first,
+        is_last=is_last,
+        is_terminal=is_terminal,
+    )
+
+
 class CustomDummy(embodied.Env):
 
   def __init__(self, task, size=(64, 64), length=100):

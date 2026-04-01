@@ -57,6 +57,7 @@ class Agent(embodied.Agent):
     self.config = config
     self.jaxcfg = jaxcfg
     self.logdir = elements.Path(config.logdir)
+    self.exclude_obs_keys = set(config.exclude_obs_keys)
 
     ext_space = self.model.ext_space  # Extra inputs to train and report.
     elements.print('Observations', color='cyan')
@@ -223,8 +224,9 @@ class Agent(embodied.Agent):
     if not self.jaxcfg.enable_policy:
       raise Exception('Policy not available when enable_policy=False')
     assert not any(k.startswith('log') for k in obs), obs.keys()
-    assert sorted(obs.keys()) == sorted(self.obs_space.keys()), (
-        sorted(obs.keys()), sorted(self.obs_space.keys()))
+    effective_obs_keys = {k for k in obs.keys() if k not in self.exclude_obs_keys}
+    assert sorted(effective_obs_keys) == sorted(self.obs_space.keys()), (
+        sorted(effective_obs_keys), sorted(self.obs_space.keys()), sorted(obs.keys()))
     for key, space in self.obs_space.items():
       assert np.isfinite(obs[key]).all(), (obs[key], key, space)
 

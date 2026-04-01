@@ -6,7 +6,7 @@ import embodied
 import numpy as np
 
 
-def eval_only(make_agent, make_env, make_logger, args):
+def eval_only(make_agent, make_batch_env, make_logger, args):
   assert args.from_checkpoint
 
   agent = make_agent()
@@ -52,8 +52,8 @@ def eval_only(make_agent, make_env, make_logger, args):
         result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()
       epstats.add(result)
 
-  fns = [bind(make_env, i) for i in range(args.envs)]
-  driver = embodied.Driver(fns, parallel=(not args.debug))
+  batch_env = make_batch_env(args)
+  driver = embodied.Driver(batch_env)
   driver.on_step(lambda tran, _: step.increment())
   driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(logfn)

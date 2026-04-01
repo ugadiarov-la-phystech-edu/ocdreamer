@@ -38,6 +38,7 @@ defaults:
     homegrid: {size: [64, 64], max_steps: 100, num_trashobjs: 2, num_trashcans: 2, p_teleport: 0.05, p_unsafe: 0.0, vis: False}
     messenger: {size: [16,16], length: 64, vis: False}
     langroom: {length: 200, vocab_size: 15}
+    customdummy: {size: [ 64, 64 ]}
 
   replay:
     size: 5e6
@@ -139,6 +140,15 @@ defaults:
     repval_grad: True
     report: True
     report_gradnorms: False
+    exclude_obs_keys_from_training: ['']
+    exclude_obs_keys: ['']
+    batch_env:
+      use_slot_extractor: False
+      batch_slot_extractor_env:
+        initialize_twice: False
+        use_previous_slots: False
+        # slot_extractor.typ in ['dinov2saur', 'slate']
+        slot_extractor: {config_path: '', checkpoint_path: '', device: 'cuda:0', typ: 'dinov2saur', initialize_twice: False}
 
 size1m: &size1m
   .*\.rssm: {deter: 512, hidden: 64, classes: 4}

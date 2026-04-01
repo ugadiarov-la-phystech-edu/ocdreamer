@@ -15,7 +15,7 @@ class Replay:
 
   def __init__(
       self, length, capacity=None, directory=None, chunksize=1024,
-      online=False, selector=None, save_wait=False, name='unnamed', seed=0):
+      online=False, selector=None, save_wait=False, name='unnamed', seed=0, exclude_keys=()):
 
     self.length = length
     self.capacity = capacity
@@ -51,6 +51,7 @@ class Replay:
     self.save_wait = save_wait
 
     self.metrics = {'samples': 0, 'inserts': 0, 'updates': 0}
+    self.exclude_keys = set(exclude_keys)
 
   def __len__(self):
     return len(self.items)
