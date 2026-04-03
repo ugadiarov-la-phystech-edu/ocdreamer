@@ -11,12 +11,13 @@ from embodied.torch.ocr.tools import SlotExtractor
 
 
 class DinoV2saur(torch.nn.Module, SlotExtractor):
-    def __init__(self, config_path, checkpoint_path, image_size, device):
+    def __init__(self, config_path, checkpoint_path, image_size, device, backbone_input_size=0):
         super().__init__()
         self._device = device
         self._config_path = config_path
         self._checkpoint_path = checkpoint_path
         self._image_size = image_size
+        self._backbone_input_size = backbone_input_size
         self._config = OmegaConf.load(self._config_path).model
         self._normalization = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
@@ -56,6 +57,10 @@ class DinoV2saur(torch.nn.Module, SlotExtractor):
     @property
     def dim(self):
         return self._config.initializer.dim
+
+    @property
+    def backbone_input_size(self):
+        return self._backbone_input_size if self._backbone_input_size else None
 
     @staticmethod
     def _instantiate(class_name, classes, kwargs):

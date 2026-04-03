@@ -8,7 +8,7 @@ from embodied.torch.ocr.tools import SlotExtractor
 
 
 class SLATEExtractor(SLATE, SlotExtractor):
-    def __init__(self, config_path, checkpoint_path, image_size, device):
+    def __init__(self, config_path, checkpoint_path, image_size, device, backbone_input_size=0):
         config_ocr = OmegaConf.load(config_path)
         config_env = namedtuple('EnvConfig', ['obs_size', 'obs_channels'])(image_size[0], 3)
         super().__init__(config_ocr, config_env, observation_space=None, preserve_slot_order=True)
@@ -16,6 +16,7 @@ class SLATEExtractor(SLATE, SlotExtractor):
         self._checkpoint_path = checkpoint_path
         self._image_size = image_size
         self._device = device
+        self._backbone_input_size = backbone_input_size
         self._opt = None
         self._config_ocr = config_ocr
 
@@ -32,3 +33,7 @@ class SLATEExtractor(SLATE, SlotExtractor):
     @property
     def dim(self):
         return self._config_ocr.slotattr.slot_size
+
+    @property
+    def backbone_input_size(self):
+        return self._backbone_input_size if self._backbone_input_size else None

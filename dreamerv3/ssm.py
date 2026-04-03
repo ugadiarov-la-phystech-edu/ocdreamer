@@ -14,6 +14,14 @@ f32 = jnp.float32
 i32 = jnp.int32
 sg = jax.lax.stop_gradient
 
+
+def _parse_vec_dists(val):
+  if isinstance(val, dict):
+    return val
+  if not val:
+    return {}
+  return dict(p.split(':') for p in val.split(','))
+
 from embodied.jax.nets import Transformer, ObjectCentricDynamics
 
 concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
@@ -627,10 +635,12 @@ class Encoder(nj.Module):
     self.vec_keys = kw.pop('vec_keys', '.*')
     self.img_keys = kw.pop('img_keys', '.*')
     self.slot_keys = kw.pop('slot_keys', '.*')
+    self.pass_keys = kw.pop('pass_keys', '$^')
 
-    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k)]
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k)]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k)]
+    self.passkeys = [k for k in obs_space if re.match(self.pass_keys, k)]
+    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k) and k not in self.passkeys]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k not in self.passkeys]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k not in self.passkeys]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
 
@@ -653,24 +663,26 @@ class Encoder(nj.Module):
     outs = {}
     bshape = reset.shape
 
+    for k in self.passkeys:
+      x = obs[k]
+      x = x.reshape((-1, *x.shape[len(bshape):]))
+      outs[k] = x
+
     if self.slotkeys and not only_text:
       x = obs[self.slot_keys]
       x = x.reshape((-1, *x.shape[len(bshape):]))
       outs[self.slot_keys] = x
 
-    if self.veckeys:
-      vspace = {k: self.obs_space[k] for k in self.veckeys}
-      vecs = {k: obs[k] for k in self.veckeys}
+    for k in self.veckeys:
       squish = nn.symlog if self.symlog else lambda x: x
-      x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
+      x = squish(obs[k])
       x = x.reshape((-1, *x.shape[bdims:]))
-      x = nn.cast(x)  # ensure compute dtype
+      x = x.reshape((x.shape[0], -1))
+      x = nn.cast(x)
       for i in range(self.layers):
-        x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
-        x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
-      assert len(self.veckeys)==1, "Expected only token or token_embed as vector input"
-      for k in self.veckeys:  
-        outs[k] = x
+        x = self.sub(f'mlp_{k}_{i}', nn.Linear, self.units, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'mlp_{k}_{i}norm', nn.Norm, self.norm)(x))
+      outs[k] = x
 
     if self.imgkeys and not only_text:
       K = self.kernel
@@ -726,15 +738,18 @@ class Decoder(nj.Module):
     self.vec_keys =  kw.pop('vec_keys', '.*')
     self.img_keys =  kw.pop('img_keys', '.*')
     self.slot_keys = kw.pop('slot_keys', '.*')
+    self.pass_keys = kw.pop('pass_keys', '$^')
 
-    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k)]
-    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k not in self.slotkeys]
-    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k not in self.slotkeys]
+    self.passkeys = [k for k in obs_space if re.match(self.pass_keys, k)]
+    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k) and k not in self.passkeys]
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2 and re.match(self.vec_keys, k) and k not in self.slotkeys and k not in self.passkeys]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3 and re.match(self.img_keys, k) and k not in self.slotkeys and k not in self.passkeys]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.imgdep = sum(obs_space[k].shape[-1] for k in self.imgkeys)
     if self.imgkeys:
       self.imgres = self.imgkeys and obs_space[self.imgkeys[0]].shape[:-1]
     self.kw = kw
+    self.vec_dists = _parse_vec_dists(kw.pop('vec_dists', {}))
     self.vec_dist = kw.pop('vec_dist', None)
     self.cnn_sigmoid = cnn_sigmoid    
     if len(self.slotkeys) > 0:
@@ -767,7 +782,8 @@ class Decoder(nj.Module):
 
     if self.slotkeys:
       spaces = {k: self.obs_space[k].shape[-1:] for k in self.slotkeys}
-      outputs = {k: 'symlog_mse' if self.symlog else 'mse' for k, v in spaces.items()}
+      default_slot_dist = 'symlog_mse' if self.symlog else 'mse'
+      outputs = {k: self.vec_dists.get(k, default_slot_dist) for k in spaces}
       kw = dict(**self.kw, act=self.act, norm=self.norm)
       x = self.sub('mlp_slots', nn.MLP, self.layers, self.units, **kw)(inp)
       x = x.reshape((*bshape, *x.shape[1:]))
@@ -779,14 +795,14 @@ class Decoder(nj.Module):
     inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
     inp = jnp.concatenate(inp, -1)
-    if self.veckeys:
-      spaces = {k: self.obs_space[k] for k in self.veckeys}
-      outputs = {k: self.vec_dist for k in spaces.keys()}
+    for k in self.veckeys:
+      space = {k: self.obs_space[k]}
+      output = {k: self.vec_dists.get(k, self.vec_dist)}
       kw = dict(**self.kw, act=self.act, norm=self.norm)
-      x = self.sub('mlp_vec', nn.MLP, self.layers, self.units, **kw)(inp)
+      x = self.sub(f'mlp_{k}', nn.MLP, self.layers, self.units, **kw)(inp)
       x = x.reshape((*bshape, *x.shape[1:]))
-      kw = dict(**self.kw, outscale=self.outscale)
-      outs = self.sub('vec', embodied.jax.DictHead, spaces, outputs, **kw)(x)
+      kw_head = dict(**self.kw, outscale=self.outscale)
+      outs = self.sub(f'head_{k}', embodied.jax.DictHead, space, output, **kw_head)(x)
       recons.update(outs)
 
     if self.imgkeys:
@@ -854,11 +870,13 @@ class ResnetEncoder(nj.Module):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
     self.slot_keys = kw.pop('slot_keys', '.*')
-    self.slotkeys = []
+    self.pass_keys = kw.pop('pass_keys', '$^')
+    self.passkeys = [k for k in obs_space if re.match(self.pass_keys, k)]
+    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k) and k not in self.passkeys]
     self.veckeys = [k for k, s in obs_space.items()
-                    if len(s.shape) <= 2 and re.match(vec_keys, k)]
+                    if len(s.shape) <= 2 and re.match(vec_keys, k) and k not in self.passkeys]
     self.imgkeys = [k for k, s in obs_space.items()
-                    if len(s.shape) == 3 and re.match(img_keys, k)]
+                    if len(s.shape) == 3 and re.match(img_keys, k) and k not in self.passkeys]
     self.mlp_layers = mlp_layers
     self.mlp_units = mlp_units
     self.cnn_depth = cnn_depth
@@ -869,6 +887,10 @@ class ResnetEncoder(nj.Module):
     self.act = act
     self.norm = norm
     self.kw = kw
+
+    if len(self.slotkeys) > 0:
+      assert len(self.slotkeys) == 1, f'{self.slotkeys}'
+      assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
 
   @property
   def entry_space(self):
@@ -884,6 +906,16 @@ class ResnetEncoder(nj.Module):
     bdims = 1 if single else 2
     bshape = reset.shape
     tokens = {}
+
+    for k in self.passkeys:
+      x = obs[k]
+      x = x.reshape((-1, *x.shape[bdims:]))
+      tokens[k] = x.reshape((*bshape, *x.shape[1:]))
+
+    if self.slotkeys and not only_text:
+      x = obs[self.slot_keys]
+      x = x.reshape((-1, *x.shape[len(bshape):]))
+      tokens[self.slot_keys] = x.reshape((*bshape, *x.shape[1:]))
 
     if self.imgkeys and not only_text:
       imgs = [obs[k] for k in sorted(self.imgkeys)]
@@ -913,20 +945,17 @@ class ResnetEncoder(nj.Module):
       for k in self.imgkeys:
         tokens[k] = x
 
-    if self.veckeys:
-      vspace = {k: self.obs_space[k] for k in self.veckeys}
-      vecs = {k: obs[k] for k in self.veckeys}
+    for k in self.veckeys:
       squish = nn.symlog if self.symlog else lambda x: x
-      x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
+      x = squish(obs[k])
       x = x.reshape((-1, *x.shape[bdims:]))
+      x = x.reshape((x.shape[0], -1))
       x = nn.cast(x)
       for i in range(self.mlp_layers):
-        x = self.sub(f'mlp{i}', nn.Linear, self.mlp_units, **self.kw)(x)
-        x = nn.act(self.act)(self.sub(f'mlp{i}n', nn.Norm, self.norm)(x))
+        x = self.sub(f'mlp_{k}_{i}', nn.Linear, self.mlp_units, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'mlp_{k}_{i}n', nn.Norm, self.norm)(x))
       x = x.reshape((*bshape, *x.shape[1:]))
-      assert len(self.veckeys) == 1, 'Expected one vector input'
-      for k in self.veckeys:
-        tokens[k] = x
+      tokens[k] = x
 
     entries = {}
     return carry, entries, tokens
@@ -941,12 +970,14 @@ class ResnetDecoder(nj.Module):
                outscale=1.0, act='silu', norm='layer', **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
-    kw.pop('slot_keys', '.*')
-    self.slotkeys = []
+    self.slot_keys = kw.pop('slot_keys', '.*')
+    self.pass_keys = kw.pop('pass_keys', '$^')
+    self.passkeys = [k for k in obs_space if re.match(self.pass_keys, k)]
+    self.slotkeys = [k for k, s in obs_space.items() if re.match(self.slot_keys, k) and k not in self.passkeys]
     self.veckeys = [k for k, s in obs_space.items()
-                    if len(s.shape) <= 2 and re.match(vec_keys, k)]
+                    if len(s.shape) <= 2 and re.match(vec_keys, k) and k not in self.slotkeys and k not in self.passkeys]
     self.imgkeys = [k for k, s in obs_space.items()
-                    if len(s.shape) == 3 and re.match(img_keys, k)]
+                    if len(s.shape) == 3 and re.match(img_keys, k) and k not in self.slotkeys and k not in self.passkeys]
     self.mlp_layers = mlp_layers
     self.mlp_units = mlp_units
     self.cnn_depth = cnn_depth
@@ -954,6 +985,7 @@ class ResnetDecoder(nj.Module):
     self.resize = resize
     self.minres = minres
     self.cnn_sigmoid = cnn_sigmoid
+    self.vec_dists = _parse_vec_dists(kw.pop('vec_dists', {}))
     self.vec_dist = vec_dist
     self.img_dist = img_dist
     self.outscale = outscale
@@ -964,6 +996,10 @@ class ResnetDecoder(nj.Module):
     self.act = act
     self.norm = norm
     self.kw = kw
+
+    if len(self.slotkeys) > 0:
+      assert len(self.slotkeys) == 1, f'{self.slotkeys}'
+      assert len(self.imgkeys) == 0, f'{self.imgkeys}: slot observation cannot be mixed with images'
 
   @property
   def entry_space(self):
@@ -978,19 +1014,37 @@ class ResnetDecoder(nj.Module):
   def __call__(self, carry, feat, reset, training, single=False):
     recons = {}
     bshape = reset.shape
+    if self.slotkeys:
+      num_slots = feat['deter'].shape[-2]
+      bshape = (*bshape, num_slots)
 
     inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
     inp = jnp.concatenate(inp, -1)
 
-    if self.veckeys:
-      spaces = {k: self.obs_space[k] for k in self.veckeys}
-      outputs = {k: self.vec_dist for k in spaces.keys()}
+    if self.slotkeys:
+      spaces = {k: self.obs_space[k].shape[-1:] for k in self.slotkeys}
+      outputs = {k: self.vec_dists.get(k, self.vec_dist) for k in spaces.keys()}
       kw = dict(**self.kw, act=self.act, norm=self.norm)
-      x = self.sub('mlp_vec', nn.MLP, self.mlp_layers, self.mlp_units, **kw)(inp)
+      x = self.sub('mlp_slots', nn.MLP, self.mlp_layers, self.mlp_units, **kw)(inp)
       x = x.reshape((*bshape, *x.shape[1:]))
       kw_head = dict(**self.kw, outscale=self.outscale)
-      outs = self.sub('vec', embodied.jax.DictHead, spaces, outputs, **kw_head)(x)
+      outs = self.sub('slot', embodied.jax.DictHead, spaces, outputs, **kw_head)(x)
+      outs = {k: embodied.jax.outs.Agg(v, 1, jnp.sum) for k, v in outs.items()}
+      recons.update(outs)
+    bshape = bshape[:-1] if self.slotkeys else bshape
+    inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
+    inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
+    inp = jnp.concatenate(inp, -1)
+
+    for k in self.veckeys:
+      space = {k: self.obs_space[k]}
+      output = {k: self.vec_dists.get(k, self.vec_dist)}
+      kw = dict(**self.kw, act=self.act, norm=self.norm)
+      x = self.sub(f'mlp_{k}', nn.MLP, self.mlp_layers, self.mlp_units, **kw)(inp)
+      x = x.reshape((*bshape, *x.shape[1:]))
+      kw_head = dict(**self.kw, outscale=self.outscale)
+      outs = self.sub(f'head_{k}', embodied.jax.DictHead, space, output, **kw_head)(x)
       recons.update(outs)
 
     if self.imgkeys:

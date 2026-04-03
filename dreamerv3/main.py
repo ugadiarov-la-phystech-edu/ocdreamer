@@ -259,6 +259,8 @@ def make_env(config, index, **overrides):
     kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
   if kwargs.pop('use_logdir', False):
     kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
+  if suite == 'langroom':
+    kwargs.pop('size', None)
   env = ctor(task, **kwargs)
   return wrap_env(env, config)
 
@@ -287,10 +289,16 @@ def wrap_env(env, config):
       slotattr_config = slot_extractor_config.slotattr
       n_slots = slotattr_config.num_slots
       dim = slotattr_config.slot_size
+    elif config_batch_slot_extractor_env.slot_extractor.typ == 'slotcontrast':
+      initializer_config = slot_extractor_config.model.initializer
+      n_slots = initializer_config.n_slots
+      dim = initializer_config.dim
     else:
       raise ValueError(f'Unknown slot extractor type: {config_batch_slot_extractor_env.slot_extractor.typ}')
 
     env = embodied.wrappers.AddSlotSpace(env, n_slots, dim)
+    if config_batch_env.use_flatten_slots:
+      env = embodied.wrappers.AddFlattenSlotSpace(env, n_slots, dim)
 
   env = embodied.wrappers.ExcludeSpaces(env, exclude_space_keys=config.agent.exclude_obs_keys)
   return env
@@ -308,18 +316,24 @@ def make_batch_env(config, args):
     elif typ == 'slate':
       from embodied.torch.ocr.slate.slate_extractor import SLATEExtractor
       cls = SLATEExtractor
+    elif typ == 'slotcontrast':
+      from embodied.torch.ocr.slotcontrast.slotcontrast_extractor import SlotContrastExtractor
+      cls = SlotContrastExtractor
+      assert config.agent.batch_env.batch_slot_extractor_env.use_previous_slots is True
     else:
       raise ValueError(f'Unknown slot extractor type: {typ}')
 
     suite = parse_suite_task(config.task)[0]
     image_size = config.env[suite].size
+    backbone_input_size = config_slot_extractor.backbone_input_size
     slot_extractor = cls(
         config_slot_extractor.config_path, config_slot_extractor.checkpoint_path, image_size,
-        config_slot_extractor.device
+        config_slot_extractor.device, backbone_input_size=backbone_input_size,
     )
     return BatchSlotExtractorEnv(slot_extractor, env_fn,
                                  use_previous_slots=config.agent.batch_env.batch_slot_extractor_env.use_previous_slots,
                                  initialize_twice=config.agent.batch_env.batch_slot_extractor_env.initialize_twice,
+                                 flatten_slots=config.agent.batch_env.use_flatten_slots,
                                  parallel=parallel)
   else:
     return BatchEnv(env_fn, parallel)

@@ -4,6 +4,7 @@ from abc import abstractmethod, ABC
 from typing import TypeVar, Optional
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 from scipy.optimize import linear_sum_assignment
@@ -69,6 +70,10 @@ class SlotExtractor(ABC):
     def dim(self):
         pass
 
+    @property
+    def backbone_input_size(self):
+        return None
+
     def get_slots(self, images, previous_slots, to_numpy=True):
         one_image = len(images.shape) == 3
         if one_image:
@@ -82,6 +87,13 @@ class SlotExtractor(ABC):
             batch_prev_slots = previous_slots
 
         batch_images = torch.as_tensor(batch_images.transpose(0, 3, 1, 2), dtype=torch.float32, device=self._device) / 255.0
+
+        if self.backbone_input_size is not None:
+            h, w = batch_images.shape[2], batch_images.shape[3]
+            target = self.backbone_input_size
+            if h != target or w != target:
+                batch_images = F.interpolate(batch_images, size=(target, target), mode='bilinear', align_corners=False)
+
         if batch_prev_slots is not None:
             batch_prev_slots = torch.as_tensor(batch_prev_slots, dtype=torch.float32, device=self._device)
 

@@ -509,11 +509,12 @@ class BatchEnv:
 
 
 class BatchSlotExtractorEnv(BatchEnv):
-  def __init__(self, slot_extractor, make_env_fns, use_previous_slots, initialize_twice, parallel=False):
+  def __init__(self, slot_extractor, make_env_fns, use_previous_slots, initialize_twice, flatten_slots=False, parallel=False):
     super().__init__(make_env_fns, parallel)
     self._slot_extractor = slot_extractor
     self._use_previous_slots = use_previous_slots
     self._initialize_twice = initialize_twice
+    self._flatten_slots = flatten_slots
     self._previous_slots = np.zeros((self.n_envs, self._slot_extractor.n_slots, self._slot_extractor.dim), dtype=np.float32)
 
   def step(self, acts):
@@ -536,6 +537,11 @@ class BatchSlotExtractorEnv(BatchEnv):
     else:
       obs['slot'] = self._slot_extractor.get_slots(images, previous_slots=None)
 
+    if self._flatten_slots:
+      slot = obs['slot']
+      obs['flatten_slots'] = slot.reshape(*slot.shape[:-2], -1)
+      del obs['slot']
+
     return obs
 
 
@@ -552,6 +558,51 @@ class AddSlotSpace(Wrapper):
         **self.env.obs_space,
         'slot': elements.Space(np.float32, shape=(self._n_slots, self._slot_dim)),
     }
+
+  def step(self, action):
+    obs = self.env.step(action)
+    obs['slot'] = np.zeros((self._n_slots, self._slot_dim), dtype=np.float32)
+    return obs
+
+
+class AddFlattenSlotSpace(Wrapper):
+
+  def __init__(self, env, n_slots, slot_dim):
+    super().__init__(env)
+    self._flat_dim = n_slots * slot_dim
+
+  @functools.cached_property
+  def obs_space(self):
+    spaces = {k: v for k, v in self.env.obs_space.items() if k != 'slot'}
+    spaces['flatten_slots'] = elements.Space(np.float32, shape=(self._flat_dim,))
+    return spaces
+
+  def step(self, action):
+    obs = self.env.step(action)
+    obs.pop('slot', None)
+    obs['flatten_slots'] = np.zeros((self._flat_dim,), dtype=np.float32)
+    return obs
+
+
+class FlattenSlots(Wrapper):
+
+  def __init__(self, env):
+    super().__init__(env)
+    slot_space = env.obs_space['slot']
+    assert len(slot_space.shape) == 2, slot_space.shape
+    self._flat_dim = slot_space.shape[0] * slot_space.shape[1]
+
+  @functools.cached_property
+  def obs_space(self):
+    spaces = {k: v for k, v in self.env.obs_space.items() if k != 'slot'}
+    spaces['flatten_slots'] = elements.Space(np.float32, shape=(self._flat_dim,))
+    return spaces
+
+  def step(self, action):
+    obs = self.env.step(action)
+    obs['flatten_slots'] = obs['slot'].reshape(*obs['slot'].shape[:-2], self._flat_dim)
+    del obs['slot']
+    return obs
 
 
 class ExcludeSpaces(Wrapper):
