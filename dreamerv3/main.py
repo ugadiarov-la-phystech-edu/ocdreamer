@@ -241,7 +241,7 @@ def make_env(config, index, **overrides):
       'minecraft': 'embodied.envs.minecraft:Minecraft',
       'loconav': 'embodied.envs.loconav:LocoNav',
       'pinpad': 'embodied.envs.pinpad:PinPad',
-      'langroom': 'langroom:LangRoom',
+      'langroom': 'embodied.envs.langroom:LangRoom',
       'procgen': 'embodied.envs.procgen:ProcGen',
       'bsuite': 'embodied.envs.bsuite:BSuite',
       'homegrid': 'embodied.envs.homegrid:HomeGrid',
