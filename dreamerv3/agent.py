@@ -241,11 +241,7 @@ class Agent(embodied.jax.Agent):
       con *= 1 - 1 / self.config.horizon
     losses['con'] = self.con(self.feat2tensor(repfeat), 2, training=training).loss(con)
     for key, recon in recons.items():
-      space = self.obs_space[key]
       target = obs[key]
-      if space.discrete and not isimage(space):
-        classes = int(np.asarray(space.classes).flatten()[0])
-        target = jax.nn.one_hot(target, classes)
       losses[key] = recon.loss(sg(target))
     if 'lm' in self.scales.keys():
       print("Adding LM loss")
@@ -494,17 +490,15 @@ class Agent(embodied.jax.Agent):
     for key, value in obs.items():
       if key.startswith('log') or key in ('key','reset', 'id'):
         continue
-      elif key in ('is_first', 'is_last', 'is_terminal'):
+      elif key in ('is_first', 'is_last', 'is_terminal', 'is_read_step') or (key in self.obs_space and self.obs_space[key].dtype == bool):
         obs[key] = value.astype(jnp.bool_)
         continue
       elif key in self.act_space and self.act_space[key].discrete:
         value = jax.nn.one_hot(value, int(self.act_space[key].high))
-      #we do one-hot for token in Encoder
-      # elif key == "token":
-      #   value = jax.nn.one_hot(value, self.obs_space[key].high)
-      #   value = value.astype(nn.COMPUTE_DTYPE)
-      elif len(value.shape) > 3 and value.dtype == jnp.uint8:
-        value = jax.tree_map(lambda x: x.astype(nn.COMPUTE_DTYPE), value) / 255.0
+      elif len(value.shape) > 3 and value.dtype == jnp.uint8 and value.shape[-1]==3:
+        value = jax.tree_map(lambda x: x.astype(jnp.float32), value) / 255.0
+      elif key in self.obs_space and self.obs_space[key].discrete:
+        value = jax.nn.one_hot(value, int(self.obs_space[key].high))
       else:
         value = value.astype(jnp.float32)
       obs[key] = value

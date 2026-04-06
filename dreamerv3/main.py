@@ -6,14 +6,13 @@ from functools import partial as bind
 
 from omegaconf import OmegaConf
 
-from embodied.core.logger import CometOutput
-from embodied.core.wrappers import BatchSlotExtractorEnv, BatchEnv
 
 folder = pathlib.Path(__file__).parent
 sys.path.insert(0, str(folder.parent))
 sys.path.insert(1, str(folder.parent.parent))
 __package__ = folder.name
 from embodied.core.logger import CometOutput
+from embodied.core.wrappers import BatchSlotExtractorEnv, BatchEnv
 import elements
 import embodied
 import numpy as np

@@ -235,30 +235,31 @@ homegrid:
   run.eval_envs: 66
   .*\.vec_keys: token$
   .*\.img_keys: image
-  agent.dec.resnet.vec_dist: onehot
+  agent.dec.resnet.vec_dists: 'token:onehot'
   batch_size: 16
   batch_length: 256
-  replay.size: 1e6
   agent.dyn.rssm.deter: 4096
-  agent.dyn.rssm.classes: 32
-  agent.rewhead.mlp.layers: 5
-  agent.conhead.mlp.layers: 5
-  agent.policy.mlp.layers: 5
-  agent.value.mlp.layers: 5
+  run.steps: 50e6
+  run.train_ratio: 32
 
 langroom:
   task: langroom_answer-only
-  run.envs: 1
-  run.eval_envs: 1
   run.train_ratio: 16
   #run.log_keys_video: [image, log_image]
   .*\.vec_keys: 'text' 
   .*\.img_keys: 'image'
-  .*\.vec_dist: onehot
+  agent.dec.resnet.vec_dists: 'text:onehot'
+  run.steps: 45e6
+  batch_size: 16 
+  batch_length: 64
+  run.envs: 4
+  run.eval_envs: 4
+  agent.dyn.rssm.deter: 6144
+  
 
 dynalang:
   agent.dyn.typ: rssm
-  #replay.online: False
+  replay.online: False
   agent.dyn.rssm.deter: 4096
   agent.dyn.rssm.classes: 32
   agent.rewhead.mlp.layers: 5
@@ -269,12 +270,13 @@ dynalang:
   agent.enc.simple.layers: 5
   agent.dec.simple.mults: [2, 3]
   agent.dec.simple.layers: 5
-  agent.dyn.rssm.imglayers: 1
   agent.loss_scales.dyn: 0.5
-  agent.loss_scales.repval: 0.0
   agent.contdisc: False
   agent.repval_loss: False
-  agent.policy_dist_disc: onehot
+  run.actor_batch: 32
+  agent.dyn.rssm.imglayers: 1 
+  agent.enc.resnet.symlog: False
+  replay.size: 1e6
 
 multicpu:
   batch_size: 12
