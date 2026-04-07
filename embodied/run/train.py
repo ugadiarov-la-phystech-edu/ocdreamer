@@ -3,6 +3,7 @@ from functools import partial as bind
 
 import elements
 import embodied
+import embodied.core.parallel
 import numpy as np
 
 
@@ -23,9 +24,9 @@ def train(make_agent, make_replay, make_batch_env, make_stream, make_logger, arg
 
   batch_steps = args.batch_size * args.batch_length
   should_train = elements.when.Ratio(args.train_ratio / batch_steps)
-  should_log = elements.when.Every(args.log_every)
+  should_log = embodied.LocalClock(args.log_every)
   should_report = elements.when.Every(args.report_every)
-  should_save = elements.when.Every(args.save_every)
+  should_save = embodied.LocalClock(args.save_every)
 
   @elements.timer.section('logfn')
   def logfn(tran, worker):
@@ -47,10 +48,10 @@ def train(make_agent, make_replay, make_batch_env, make_stream, make_logger, arg
           episode.add(key, value, agg='stack')
     if tran['is_last']:
       result = episode.result()
-      logger.add({
-          'score': result.pop('score'),
-          'length': result.pop('length'),
-      }, prefix='episode')
+      result_metrics = {'score': result.pop('score'), 'length': result.pop('length')}
+      if 'log/success' in tran:
+        result_metrics['success'] = int(tran['log/success'])
+      logger.add(result_metrics, prefix='episode')
       rew = result.pop('rewards')
       if len(rew) > 1:
         result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()

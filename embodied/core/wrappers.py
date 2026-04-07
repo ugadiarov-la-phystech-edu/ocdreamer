@@ -423,94 +423,35 @@ class RestartOnException(Wrapper):
       return self.env.step(action)
 
 class BatchEnv:
-  def __init__(self, make_env_fns, parallel):
-    self.parallel = parallel
+  def __init__(self, make_env_fns, parallel_strategy='process'):
+    self.parallel_strategy = parallel_strategy
+    self.parallel = parallel_strategy != 'none'
     self.n_envs = len(make_env_fns)
     if self.parallel:
-      import multiprocessing as mp
-      context = mp.get_context()
-      self.pipes, pipes = zip(*[context.Pipe() for _ in range(len(make_env_fns))])
-      self.stop = context.Event()
-      fns = [cloudpickle.dumps(fn) for fn in make_env_fns]
-      self.procs = [
-          portal.Process(self._env_server, self.stop, i, pipe, fn, start=True)
-          for i, (fn, pipe) in enumerate(zip(fns, pipes))]
-      self.pipes[0].send(('act_space',))
-      self.act_space = self._receive(self.pipes[0])
+      from embodied.core.parallel import Parallel
+      self.envs = [Parallel(fn, parallel_strategy) for fn in make_env_fns]
     else:
       self.envs = [fn() for fn in make_env_fns]
-      self.act_space = self.envs[0].act_space
-
-  def _receive(self, pipe):
-    try:
-      msg, arg = pipe.recv()
-      if msg == 'error':
-        raise RuntimeError(arg)
-      assert msg == 'result'
-      return arg
-    except Exception:
-      print('Terminating workers due to an exception.')
-      [proc.kill() for proc in self.procs]
-      raise
-
-  @staticmethod
-  def _env_server(stop, envid, pipe, ctor):
-    try:
-      ctor = cloudpickle.loads(ctor)
-      env = ctor()
-      while not stop.is_set():
-        if not pipe.poll(0.1):
-          time.sleep(0.1)
-          continue
-        try:
-          msg, *args = pipe.recv()
-        except EOFError:
-          return
-        if msg == 'step':
-          assert len(args) == 1
-          act = args[0]
-          obs = env.step(act)
-          pipe.send(('result', obs))
-        elif msg == 'obs_space':
-          assert len(args) == 0
-          pipe.send(('result', env.obs_space))
-        elif msg == 'act_space':
-          assert len(args) == 0
-          pipe.send(('result', env.act_space))
-        else:
-          raise ValueError(f'Invalid message {msg}')
-    except ConnectionResetError:
-      print('Connection to driver lost')
-    except Exception as e:
-      pipe.send(('error', e))
-      raise
-    finally:
-      try:
-        env.close()
-      except Exception:
-        pass
-      pipe.close()
+    self.act_space = self.envs[0].act_space
 
   def step(self, acts):
+    obs = [env.step(act) for env, act in zip(self.envs, acts)]
     if self.parallel:
-      [pipe.send(('step', act)) for pipe, act in zip(self.pipes, acts)]
-      obs = [self._receive(pipe) for pipe in self.pipes]
-    else:
-      obs = [env.step(act) for env, act in zip(self.envs, acts)]
-
+      obs = [ob() for ob in obs]
     obs = {k: np.stack([x[k] for x in obs]) for k in obs[0].keys()}
     return obs
 
   def close(self):
-    if self.parallel:
-      [proc.kill() for proc in self.procs]
-    else:
-      [env.close() for env in self.envs]
+    for i, env in enumerate(self.envs):
+      try:
+        env.close()
+      except Exception as e:
+        print(f'Failed to close env {i}: {e}')
 
 
 class BatchSlotExtractorEnv(BatchEnv):
-  def __init__(self, slot_extractor, make_env_fns, use_previous_slots, initialize_twice, flatten_slots=False, parallel=False):
-    super().__init__(make_env_fns, parallel)
+  def __init__(self, slot_extractor, make_env_fns, use_previous_slots, initialize_twice, flatten_slots=False, parallel_strategy='process'):
+    super().__init__(make_env_fns, parallel_strategy)
     self._slot_extractor = slot_extractor
     self._use_previous_slots = use_previous_slots
     self._initialize_twice = initialize_twice

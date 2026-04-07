@@ -11,7 +11,7 @@ folder = pathlib.Path(__file__).parent
 sys.path.insert(0, str(folder.parent))
 sys.path.insert(1, str(folder.parent.parent))
 __package__ = folder.name
-from embodied.core.logger import CometOutput
+from embodied.core.logger import CometOutput, JSONLOutput
 from embodied.core.wrappers import BatchSlotExtractorEnv, BatchEnv
 import elements
 import embodied
@@ -161,9 +161,9 @@ def make_logger(config):
   outputs.append(elements.logger.TerminalOutput(config.logger.filter, 'Agent'))
   for output in config.logger.outputs:
     if output == 'jsonl':
-      outputs.append(elements.logger.JSONLOutput(logdir, 'metrics.jsonl'))
-      outputs.append(elements.logger.JSONLOutput(
-          logdir, 'scores.jsonl', 'episode/score'))
+      outputs.append(JSONLOutput(logdir, 'metrics.jsonl'))
+      outputs.append(JSONLOutput(
+          logdir, 'scores.jsonl', 'episode/(score|success|length)', log_multivalue=True))
     elif output == 'tensorboard':
       outputs.append(elements.logger.TensorBoardOutput(
           logdir, config.logger.fps))
@@ -305,7 +305,7 @@ def wrap_env(env, config):
 
 def make_batch_env(config, args):
   env_fn = [bind(make_env, config, i) for i in range(args.envs)]
-  parallel = not args.debug
+  parallel_strategy = args.parallel_strategy
   if config.agent.batch_env.use_slot_extractor:
     config_slot_extractor = config.agent.batch_env.batch_slot_extractor_env.slot_extractor
     typ = config_slot_extractor.typ
@@ -333,9 +333,9 @@ def make_batch_env(config, args):
                                  use_previous_slots=config.agent.batch_env.batch_slot_extractor_env.use_previous_slots,
                                  initialize_twice=config.agent.batch_env.batch_slot_extractor_env.initialize_twice,
                                  flatten_slots=config.agent.batch_env.use_flatten_slots,
-                                 parallel=parallel)
+                                 parallel_strategy=parallel_strategy)
   else:
-    return BatchEnv(env_fn, parallel)
+    return BatchEnv(env_fn, parallel_strategy)
 
 
 def make_stream(config, replay, mode):
