@@ -277,8 +277,9 @@ class BlockLinear(nj.Module):
       x += self.value('bias', init(self.binit), self.units).astype(x.dtype)
     return x
 
-  def _scaled_winit(self, *args, **kwargs):
-    return init(self.winit)(*args, **kwargs) * self.outscale
+  def _scaled_winit(self, shape, *args, **kwargs):
+    fshape = shape[-2:] 
+    return init(self.winit)(shape, *args, fshape=fshape, **kwargs) * self.outscale
 
 
 class Conv2D(nj.Module):
