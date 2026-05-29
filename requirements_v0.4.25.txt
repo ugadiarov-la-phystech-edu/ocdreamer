@@ -22,3 +22,5 @@ tqdm
 comet_ml
 moviepy==1.0.3
 ml_dtypes==0.5.4
+homegrid
+langroom
