@@ -286,7 +286,7 @@ class Decoder(nj.Module):
     return {}
 
   def __call__(self, carry, feat, reset, training, single=False):
-    assert feat['deter'].shape[-1] % self.bspace == 0
+    assert not self.bspace or feat['deter'].shape[-1] % self.bspace == 0
     K = self.kernel
     recons = {}
     bshape = reset.shape

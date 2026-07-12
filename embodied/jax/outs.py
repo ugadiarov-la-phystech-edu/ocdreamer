@@ -224,7 +224,7 @@ class Categorical(Output):
         seed, self.logits, -1, shape + self.logits.shape[:-1])
 
   def logp(self, event):
-    onehot = jax.nn.one_hot(event, self.logits.shape[-1])
+    onehot = jax.nn.one_hot(i32(event), self.logits.shape[-1])
     return (jax.nn.log_softmax(self.logits, -1) * onehot).sum(-1)
 
   def entropy(self):
